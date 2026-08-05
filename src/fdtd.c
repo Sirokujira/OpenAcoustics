@@ -99,6 +99,22 @@ static int geom_aabb(const ac_geom_t *g, double lo[3], double hi[3])
 	}
 }
 
+/* 点を含む剛体形状の番号 (0 起点。無ければ -1)。エラーメッセージ用 —
+ * ボクセル化と同じ AABB 判定を使う (形状の近似も含めて実際に剛体になった
+ * 領域と一致させるため)。 */
+static int geom_containing(const ac_t *ac, double x, double y, double z)
+{
+	double lo[3], hi[3];
+	int n;
+	for (n = 0; n < ac->ngeom; n++) {
+		if (!geom_aabb(&ac->geom[n], lo, hi)) continue;
+		if (x >= lo[0] && x <= hi[0] && y >= lo[1] && y <= hi[1] &&
+		    z >= lo[2] && z <= hi[2])
+			return n;
+	}
+	return -1;
+}
+
 static int snap_cell(double x, double x0, double dx, int n)
 {
 	int i = (int)floor((x - x0) / dx);
@@ -329,8 +345,17 @@ int ac_setup(ac_t *ac)
 	ac->jsrc = snap_cell(ac->srcy, ac->y0, ac->dx, ny);
 	ac->ksrc = snap_cell(ac->srcz, ac->z0, ac->dx, nz);
 	if (ac->solid[((size_t)ac->ksrc * ny + ac->jsrc) * nx + ac->isrc]) {
-		ac_err(ac, "feed position (%.4g, %.4g, %.4g) is inside rigid geometry",
-		       ac->srcx, ac->srcy, ac->srcz);
+		int gi = geom_containing(ac, ac->srcx, ac->srcy, ac->srcz);
+		if (gi >= 0)
+			ac_err(ac, "feed position (%.4g, %.4g, %.4g) is inside rigid "
+			       "geometry #%d (shape %d) — move the source out of the "
+			       "object (e.g. 1.5 m above the stage floor)",
+			       ac->srcx, ac->srcy, ac->srcz, gi + 1, ac->geom[gi].shape);
+		else
+			ac_err(ac, "feed position (%.4g, %.4g, %.4g) is inside rigid "
+			       "geometry — move the source out of the object "
+			       "(e.g. 1.5 m above the stage floor)",
+			       ac->srcx, ac->srcy, ac->srcz);
 		return 1;
 	}
 	ac_log(ac, "source: (%.6g, %.6g, %.6g) m -> cell (%d, %d, %d), "
@@ -345,8 +370,20 @@ int ac_setup(ac_t *ac)
 		r->jc = snap_cell(r->y, ac->y0, ac->dx, ny);
 		r->kc = snap_cell(r->z, ac->z0, ac->dx, nz);
 		if (ac->solid[((size_t)r->kc * ny + r->jc) * nx + r->ic]) {
-			ac_err(ac, "point #%d (%.4g, %.4g, %.4g) is inside rigid geometry",
-			       n + 1, r->x, r->y, r->z);
+			/* 剛体内の受音点は測れない。どの形状に入っているかと、
+			 * 典型的な直し方 (耳の高さへ上げる) を添えて失敗する。 */
+			int gi = geom_containing(ac, r->x, r->y, r->z);
+			if (gi >= 0)
+				ac_err(ac, "point #%d (%.4g, %.4g, %.4g) is inside rigid "
+				       "geometry #%d (shape %d) — move it out of the object, "
+				       "e.g. to ear height above the floor/audience block "
+				       "(ISO 3382-1: 1.2 m seated)",
+				       n + 1, r->x, r->y, r->z, gi + 1, ac->geom[gi].shape);
+			else
+				ac_err(ac, "point #%d (%.4g, %.4g, %.4g) is inside rigid "
+				       "geometry — move it out of the object, e.g. to ear "
+				       "height above the floor (ISO 3382-1: 1.2 m seated)",
+				       n + 1, r->x, r->y, r->z);
 			return 1;
 		}
 		recv_filename(r, n);
