@@ -107,27 +107,45 @@ static int snap_cell(double x, double x0, double dx, int n)
 	return i;
 }
 
-/* 受音点の WAV ファイル名 : #1 は rir.wav、以降は rir_<名前>.wav
- * (名前が空なら rir_2.wav 等 — GUI の rir_<受音点名>.wav 自動割当と噛み合う) */
+/* 名前 → ファイル名に使える形 (ファイル名に使えない ASCII だけを '_' へ)。
+ * 非 ASCII (UTF-8 の日本語など) はそのまま残す — GUI の受音点名は既定で
+ * 「マイク N」なので、ここで潰すと GUI 側の自動割当 (rir_<受音点名>.wav の
+ * 名前照合) が一致しなくなる。Windows の UTF-8 名は ac_fopen (_wfopen) が扱う。 */
+static void safe_name(const char *name, char *out, size_t cap)
+{
+	size_t i;
+	for (i = 0; name[i] != '\0' && i + 1 < cap; i++) {
+		unsigned char c = (unsigned char)name[i];
+		int bad = (c < 0x20) || c == '/' || c == '\\' || c == ':' ||
+		          c == '*' || c == '?' || c == '"' || c == '<' ||
+		          c == '>' || c == '|' || c == ' ';
+		out[i] = bad ? '_' : (char)c;
+	}
+	out[i] = '\0';
+}
+
+/* 受音点の WAV ファイル名 : #1 は契約どおり rir.wav、以降は rir_<名前>.wav
+ * (名前が空なら rir_2.wav 等 — GUI の rir_<受音点名>.wav 自動割当と噛み合う)。
+ * #1 に名前があるときは別名 rir_<名前>.wav も出す (alias) — 受音点が複数ある
+ * とき、GUI の自動割当は名前でしか照合できず rir.wav だけでは #1 が
+ * 割り当てられないため。 */
 static void recv_filename(ac_recv_t *r, int index)
 {
+	char safe[AC_NAME_MAX];
+	r->alias[0] = '\0';
 	if (index == 0) {
 		strcpy(r->file, "rir.wav");
+		if (r->name[0] != '\0') {
+			safe_name(r->name, safe, sizeof(safe));
+			snprintf(r->alias, sizeof(r->alias), "rir_%s.wav", safe);
+		}
 		return;
 	}
 	if (r->name[0] == '\0') {
 		snprintf(r->file, sizeof(r->file), "rir_%d.wav", index + 1);
 	}
 	else {
-		char safe[AC_NAME_MAX];
-		int i;
-		for (i = 0; r->name[i] != '\0' && i < AC_NAME_MAX - 1; i++) {
-			char c = r->name[i];
-			int ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-			         (c >= 'a' && c <= 'z') || c == '_' || c == '-';
-			safe[i] = ok ? c : '_';
-		}
-		safe[i] = '\0';
+		safe_name(r->name, safe, sizeof(safe));
 		snprintf(r->file, sizeof(r->file), "rir_%s.wav", safe);
 	}
 }

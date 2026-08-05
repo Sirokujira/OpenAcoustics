@@ -16,6 +16,30 @@
 #include <string.h>
 #include "acoustic.h"
 
+#ifdef _WIN32
+#include <windows.h>   /* MultiByteToWideChar (ac_fopen の UTF-8 → UTF-16) */
+#endif
+
+/* UTF-8 パス対応の fopen (宣言は acoustic.h)。Windows の fopen は ANSI
+ * コードページで解釈するため、日本語を含むパス・ファイル名が開けない。
+ * GUI (OpenFDTD-X) の受音点名は既定で「マイク N」なので実害がある。 */
+FILE *ac_fopen(const char *path, const char *mode)
+{
+#ifdef _WIN32
+	wchar_t wpath[AC_PATH_MAX + 160];
+	wchar_t wmode[8];
+	int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
+	                            (int)(sizeof(wpath) / sizeof(wpath[0])));
+	if (n <= 0) return fopen(path, mode);   /* 変換できなければ従来経路 */
+	n = MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode,
+	                        (int)(sizeof(wmode) / sizeof(wmode[0])));
+	if (n <= 0) return fopen(path, mode);
+	return _wfopen(wpath, wmode);
+#else
+	return fopen(path, mode);
+#endif
+}
+
 /* ログ : solver.log へ (開けていなければ黙って捨てない — stderr へ) */
 void ac_log(ac_t *ac, const char *fmt, ...)
 {
@@ -71,6 +95,22 @@ static int write_rirs(ac_t *ac)
 		}
 		ac_log(ac, "output: %s (%d samples, float32 %d Hz)",
 		       ac->recv[r].file, ac->nsteps, ac->fs);
+		/* #1 の別名 rir_<名前>.wav (GUI の名前照合による自動割当用) */
+		if (ac->recv[r].alias[0] != '\0') {
+			if (join_path(path, sizeof(path), ac->workdir,
+			              ac->recv[r].alias) != 0) {
+				ac_err(ac, "output path too long for receiver #%d alias", r + 1);
+				return 1;
+			}
+			if (ac_write_wav_f32(path, ac->fs,
+			                     ac->rec + (size_t)r * ac->nsteps,
+			                     ac->nsteps) != 0) {
+				ac_err(ac, "cannot write %s", path);
+				return 1;
+			}
+			ac_log(ac, "output: %s (alias of %s — 名前照合の自動割当用)",
+			       ac->recv[r].alias, ac->recv[r].file);
+		}
 	}
 	return 0;
 }
@@ -109,7 +149,7 @@ int main(int argc, char **argv)
 	/* solver.log (契約の必須出力) を最初に開く — 書けない working_dir は
 	 * その時点で異常。以降のログはファイルにも残る。 */
 	if (join_path(logpath, sizeof(logpath), ac.workdir, "solver.log") != 0 ||
-	    (ac.logfp = fopen(logpath, "w")) == NULL) {
+	    (ac.logfp = ac_fopen(logpath, "w")) == NULL) {
 		fprintf(stderr, "%s: error: cannot write solver.log in '%s' "
 		        "(directory missing or not writable)\n",
 		        AC_SOLVER_NAME, ac.workdir);
@@ -124,7 +164,7 @@ int main(int argc, char **argv)
 	/* 入力ファイルの決定 */
 	if (nargs == 2) {
 		/* 指定名 : まずそのまま、開けなければ working_dir 直下として解決 */
-		FILE *fp = fopen(args[1], "rb");
+		FILE *fp = ac_fopen(args[1], "rb");
 		if (fp) {
 			fclose(fp);
 			if (strlen(args[1]) >= sizeof(ac.ofd_path)) {
@@ -135,7 +175,7 @@ int main(int argc, char **argv)
 		}
 		else if (join_path(ac.ofd_path, sizeof(ac.ofd_path),
 		                   ac.workdir, args[1]) != 0 ||
-		         (fp = fopen(ac.ofd_path, "rb")) == NULL) {
+		         (fp = ac_fopen(ac.ofd_path, "rb")) == NULL) {
 			ac_err(&ac, "input file '%s' not found (neither as given nor in %s)",
 			       args[1], ac.workdir);
 			goto failed;

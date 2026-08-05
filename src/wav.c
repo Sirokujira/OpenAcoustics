@@ -51,7 +51,7 @@ int ac_write_wav_f32(const char *path, int fs, const double *x, int n)
 	memcpy(h + 36, "data", 4);
 	put_u32le(h + 40, data_size);
 
-	fp = fopen(path, "wb");
+	fp = ac_fopen(path, "wb");
 	if (!fp) return -1;
 	if (fwrite(h, 1, sizeof(h), fp) != sizeof(h)) {
 		fclose(fp);

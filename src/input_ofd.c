@@ -161,7 +161,7 @@ int ac_read_ofd(ac_t *ac)
 	char *tok[MAXTOKEN];
 	int ntoken, nline = 0;
 	int have_mesh[3] = { 0, 0, 0 };
-	FILE *fp = fopen(ac->ofd_path, "r");
+	FILE *fp = ac_fopen(ac->ofd_path, "r");
 
 	if (!fp) {
 		ac_err(ac, "cannot open input '%s'", ac->ofd_path);

@@ -235,6 +235,29 @@ else
 	status=1
 fi
 
+echo "--- (g) receiver names from the .ofdx sidecar (GUI 連携)"
+# GUI (OpenFDTD-X) は受音点名を .ofdx acoustic.receivers[] に持ち、.ofd の
+# point 行には名前を書かない。座標一致で名前を引き当て、rir_<受音点名>.wav
+# を出すことで GUI の「フォルダから自動割当」(名前照合) と噛み合う。
+# 期待するファイル名の根拠は named_recv.ofd の先頭コメント。
+run_case named_recv named_recv.ofd named_recv.ofdx && {
+	d="$WORK/named_recv"
+	for f in "rir.wav" "rir_マイク_1.wav" "rir_mic-B.wav" "rir_3.wav"; do
+		if [ -f "$d/$f" ]; then
+			printf "%-26s -> OK\n" "named recv: $f"
+		else
+			printf "%-26s -> NG (missing)\n" "named recv: $f" >&2; status=1
+		fi
+	done
+	# 無効行 (enabled=false) と座標の合わない行は名前を配らない
+	if [ -f "$d/rir_disabled.wav" ] || [ -f "$d/rir_elsewhere.wav" ]; then
+		printf "%-26s -> NG (disabled/unmatched row was used)\n" "named recv: filtering" >&2
+		status=1
+	else
+		printf "%-26s -> OK (disabled と不一致行は無視)\n" "named recv: filtering"
+	fi
+}
+
 echo "--- (f) error paths (honest non-zero exit, no fabricated output)"
 # 入力なし
 rm -rf "$WORK/empty"; mkdir -p "$WORK/empty"

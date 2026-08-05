@@ -41,7 +41,7 @@ int ac_write_metadata(ac_t *ac)
 	if (snprintf(path, sizeof(path), "%s/metadata.json", ac->workdir)
 	    >= (int)sizeof(path))
 		return 1;
-	fp = fopen(path, "w");
+	fp = ac_fopen(path, "w");
 	if (!fp) {
 		ac_err(ac, "cannot write metadata.json in %s", ac->workdir);
 		return 1;
@@ -107,7 +107,7 @@ int ac_write_metrics(ac_t *ac)
 	if (snprintf(path, sizeof(path), "%s/metrics.json", ac->workdir)
 	    >= (int)sizeof(path))
 		return 1;
-	fp = fopen(path, "w");
+	fp = ac_fopen(path, "w");
 	if (!fp) {
 		ac_err(ac, "cannot write metrics.json in %s", ac->workdir);
 		return 1;

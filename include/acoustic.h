@@ -43,6 +43,10 @@ typedef struct {
 typedef struct {
 	char   name[AC_NAME_MAX];   /* .ofd point 行の "# 名前" (空可) */
 	char   file[AC_NAME_MAX + 16]; /* 出力 WAV ファイル名 (setup で決定) */
+	/* 受音点 #1 用の別名 rir_<名前>.wav (契約の rir.wav に加えて出す。
+	 * GUI の「フォルダから自動割当」は名前照合なので、#1 も名前付きの
+	 * ファイルが無いと割り当てられない)。空なら出力しない。 */
+	char   alias[AC_NAME_MAX + 16];
 	double x, y, z;             /* 指定座標 [m] */
 	int    ic, jc, kc;          /* スナップ後のセル (setup で決定) */
 } ac_recv_t;
@@ -108,6 +112,12 @@ typedef struct {
 /* main.c : ログ (solver.log とエラー時は stderr へ) */
 void ac_log(ac_t *ac, const char *fmt, ...);
 void ac_err(ac_t *ac, const char *fmt, ...);
+
+/* UTF-8 パスで開く fopen。Windows の fopen は ANSI コードページ解釈なので
+ * 日本語を含むパス・ファイル名 (GUI の受音点名は既定で「マイク N」) が
+ * 開けない。Windows だけ UTF-16 へ変換して _wfopen を使う。
+ * 他 OS は fopen そのまま。 */
+FILE *ac_fopen(const char *path, const char *mode);
 
 /* input_ofd.c */
 int ac_find_input(ac_t *ac);              /* workdir から唯一の .ofd を探す */

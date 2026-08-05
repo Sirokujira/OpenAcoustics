@@ -16,7 +16,7 @@ WAV / JSON は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 : 解析解との比較 35 判定 (モード周波数 / 反射係数 / 到達時刻 /
+# 検証 : 解析解との比較 40 判定 (モード周波数 / 反射係数 / 到達時刻 /
 # エネルギー保存 / T_Sabine / 決定性 / 契約 / 異常系)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 
@@ -25,7 +25,7 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
 ./bin/ofdx_acoustic_fdtd /tmp/ac-hall && grep "normal end" /tmp/ac-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**35 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**40 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -86,7 +86,10 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
   足したらここにも足す)。
 - `.ofd` の書式を変えない・既存キーの意味を変えない (本家 OpenFDTD 互換)。
   未知キーは無視 (前方互換)。拡張は `.ofdx` 側に足す (読むキーは
-  `acoustic.absorption[]` のみ — 増やすときも未知キー無視を保つ)。
+  `acoustic.absorption[]` と `acoustic.receivers[]` — 増やすときも未知キー
+  無視を保つ)。receivers は GUI が持つ受音点名の引き当てにだけ使い、
+  **座標一致 (許容 = dxmin)** で `.ofd` の point 行と対応させる
+  (GUI はマイク配置時に point と receivers の両方へ同じ座標の行を作る)。
 - 新機能には data/sample/ の**解析解付き検証ケース**を追加し、
   `acoustic_check.sh` に判定を足す (CI 3 OS + sanitize で自動実行される)。
   期待値は**コードと独立な出所** (教科書の公式・解析解) にすること。

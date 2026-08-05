@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 4, "name": "Floor", "area": 4.0, "alpha": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1], "air_a": 0.0 }
+    ],
+    "receivers": [
+      { "enabled": true,  "x": 1.45, "y": 1.45, "z": 1.45, "type": 0, "name": "マイク 1", "rir_file": "" },
+      { "enabled": true,  "x": 1.45, "y": 0.55, "z": 1.45, "type": 0, "name": "mic-B",   "rir_file": "" },
+      { "enabled": false, "x": 0.55, "y": 1.45, "z": 1.45, "type": 0, "name": "disabled", "rir_file": "" },
+      { "enabled": true,  "x": 9.99, "y": 9.99, "z": 9.99, "type": 0, "name": "elsewhere", "rir_file": "" }
+    ]
+  }
+}

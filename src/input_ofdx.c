@@ -201,8 +201,83 @@ static int parse_absorption(ac_t *ac, js_t *j)
 	}
 }
 
-/* オブジェクトを歩き、目的キーだけ target で処理し他は読み飛ばす */
-static int walk_object(ac_t *ac, js_t *j, const char *target, int depth)
+/* ── receivers 1 行 → 同じ位置の受音点へ名前を配る ───────────────
+ *
+ * GUI (OpenFDTD-X) の受音点リスト .ofdx acoustic.receivers[] は名前を持つが、
+ * ソルバーが記録するのは .ofd の point 行である。両者は「マイクを 3D シーンへ
+ * 配置すると point と receivers の両方に同じ座標の行が入る」という GUI の
+ * 仕様で対応するので、**座標一致** (許容 = メッシュ最小刻み dxmin) で名前を
+ * 引き当てる。名前が付くと出力が rir_<受音点名>.wav になり、GUI の
+ * 「フォルダから自動割当」(rir_<受音点名>.wav) と噛み合う。
+ * 一致しない行・無効行・既に名前のある受音点は素通り (前方互換)。 */
+static void assign_recv_name(ac_t *ac, double x, double y, double z,
+                             const char *name)
+{
+	double tol = (ac->dxmin > 0.0) ? ac->dxmin : 1e-6;
+	double best = -1.0;
+	int bi = -1, i;
+
+	if (name[0] == '\0') return;
+	for (i = 0; i < ac->nrecv; i++) {
+		double dx = ac->recv[i].x - x;
+		double dy = ac->recv[i].y - y;
+		double dz = ac->recv[i].z - z;
+		double d2 = dx * dx + dy * dy + dz * dz;
+		if (ac->recv[i].name[0] != '\0') continue;   /* .ofd の名前を優先 */
+		if (d2 > tol * tol) continue;
+		if (bi < 0 || d2 < best) { best = d2; bi = i; }
+	}
+	if (bi < 0) return;
+	snprintf(ac->recv[bi].name, sizeof(ac->recv[bi].name), "%s", name);
+	ac_log(ac, ".ofdx: receiver #%d (%g %g %g) -> name \"%s\"",
+	       bi + 1, ac->recv[bi].x, ac->recv[bi].y, ac->recv[bi].z, name);
+}
+
+static int parse_receiver_row(ac_t *ac, js_t *j)
+{
+	char key[64];
+	char name[AC_NAME_MAX];
+	double x = 0.0, y = 0.0, z = 0.0, v;
+	int enabled = 1;                    /* 欠落キーは既定値 (旧ファイル互換) */
+
+	name[0] = '\0';
+	if (jexpect(j, '{')) return 1;
+	if (jpeek(j) == '}') { j->s++; return 0; }
+	for (;;) {
+		if (jstring(j, key, sizeof(key))) return 1;
+		if (jexpect(j, ':')) return 1;
+		if (!strcmp(key, "enabled")) {
+			if (jbool(j, &enabled)) return 1;
+		}
+		else if (!strcmp(key, "x")) { if (jnumber(j, &v)) return 1; x = v; }
+		else if (!strcmp(key, "y")) { if (jnumber(j, &v)) return 1; y = v; }
+		else if (!strcmp(key, "z")) { if (jnumber(j, &v)) return 1; z = v; }
+		else if (!strcmp(key, "name")) {
+			if (jstring(j, name, sizeof(name))) return 1;
+		}
+		else {
+			if (jskip(j)) return 1;   /* type / rir_file / 未知キー */
+		}
+		if (jpeek(j) == ',') { j->s++; continue; }
+		if (jexpect(j, '}')) return 1;
+		if (enabled) assign_recv_name(ac, x, y, z, name);
+		return 0;
+	}
+}
+
+static int parse_receivers(ac_t *ac, js_t *j)
+{
+	if (jexpect(j, '[')) return 1;
+	if (jpeek(j) == ']') { j->s++; return 0; }
+	for (;;) {
+		if (parse_receiver_row(ac, j)) return 1;
+		if (jpeek(j) == ',') { j->s++; continue; }
+		return jexpect(j, ']');
+	}
+}
+
+/* root.acoustic の中身 (読むのは absorption / receivers のみ、他は読み飛ばす) */
+static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
 	if (jexpect(j, '{')) return 1;
@@ -210,14 +285,32 @@ static int walk_object(ac_t *ac, js_t *j, const char *target, int depth)
 	for (;;) {
 		if (jstring(j, key, sizeof(key))) return 1;
 		if (jexpect(j, ':')) return 1;
+		if (!strcmp(key, "absorption")) {
+			if (parse_absorption(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "receivers")) {
+			if (parse_receivers(ac, j)) return 1;
+		}
+		else {
+			if (jskip(j)) return 1;
+		}
+		if (jpeek(j) == ',') { j->s++; continue; }
+		return jexpect(j, '}');
+	}
+}
+
+/* root オブジェクトを歩き、acoustic だけ処理して他は読み飛ばす */
+static int walk_object(ac_t *ac, js_t *j, const char *target, int depth)
+{
+	char key[64];
+	(void)depth;
+	if (jexpect(j, '{')) return 1;
+	if (jpeek(j) == '}') { j->s++; return 0; }
+	for (;;) {
+		if (jstring(j, key, sizeof(key))) return 1;
+		if (jexpect(j, ':')) return 1;
 		if (!strcmp(key, target)) {
-			if (depth == 0) {
-				/* root.acoustic → その中の absorption へ */
-				if (walk_object(ac, j, "absorption", 1)) return 1;
-			}
-			else {
-				if (parse_absorption(ac, j)) return 1;
-			}
+			if (walk_acoustic(ac, j)) return 1;
 		}
 		else {
 			if (jskip(j)) return 1;
@@ -229,7 +322,7 @@ static int walk_object(ac_t *ac, js_t *j, const char *target, int depth)
 
 int ac_read_ofdx(ac_t *ac)
 {
-	FILE *fp = fopen(ac->ofdx_path, "rb");
+	FILE *fp = ac_fopen(ac->ofdx_path, "rb");
 	char *buf;
 	long len;
 	js_t j;

@@ -22,7 +22,7 @@ GUI から QProcess で起動され、部屋のインパルス応答 (RIR) を�
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 (解析解との比較 — 35 判定)
+# 検証 (解析解との比較 — 40 判定)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 ```
 
@@ -50,7 +50,7 @@ ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]
 | ファイル | 必須 | 内容 |
 |---|---|---|
 | `rir.wav` | ○ | 受音点 #1 の RIR (float32 モノラル WAV、fs = サンプリング周波数) |
-| `rir_<名前>.wav` | — | 受音点 #2 以降 (名前は `.ofd` point 行末の `# 名前`。空なら `rir_2.wav` 等) |
+| `rir_<名前>.wav` | — | 受音点ごとの RIR。名前は **`.ofd` point 行末の `# 名前` → `.ofdx` の `acoustic.receivers[]` (座標一致で引き当て)** の順に決まり、どちらも無ければ `rir_2.wav` 等の連番。受音点 #1 は契約どおり `rir.wav` を出すが、名前があるときは別名 `rir_<名前>.wav` も併せて出す (GUI の自動割当は名前照合のため) |
 | `metadata.json` | ○ | `contract_version: 1`、ソルバー名/バージョン、格子 (Δx・セル数)、fs、音源/受音点座標、音速、実行条件 |
 | `metrics.json` | — | T_Sabine 等の参考値 (GUI は自前計算を正とし突合表示のみ) |
 | `solver.log` | ○ | 実行ログ (`normal end` で正常終了) |
