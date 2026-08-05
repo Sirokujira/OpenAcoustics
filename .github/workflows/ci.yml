@@ -1,0 +1,187 @@
+# OpenAcoustics CI — 3 OS でビルド + 解析解との検証 (data/sample/acoustic_check.sh)。
+# OpenPEEC の ci.yml を踏襲。依存ライブラリなし (OpenMP は任意) のため
+# vcpkg/HDF5 等の手順は不要。検証スクリプトは 3 OS とも同一の POSIX sh を使う
+# (Windows は Git Bash)。
+name: CI
+
+on:
+  push:
+    branches: [ main, "claude/**" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # タグ push 時の Release 添付に使用
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Validation tests (analytic solutions)
+        run: sh data/sample/acoustic_check.sh "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd" /tmp/ac-check
+
+      - name: E2E smoke (concert-hall scale)
+        run: |
+          mkdir -p /tmp/ac-hall
+          cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-hall/
+          "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd" /tmp/ac-hall | grep -Ec "^progress [0-9]+/[0-9]+$"
+          grep "normal end" /tmp/ac-hall/solver.log
+          test -s /tmp/ac-hall/rir.wav && test -s /tmp/ac-hall/rir_balcony.wav
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofdx_acoustic_fdtd-linux-x64
+          path: bin/ofdx_acoustic_fdtd
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf ofdx_acoustic_fdtd-linux-x64.tar.gz -C bin ofdx_acoustic_fdtd
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofdx_acoustic_fdtd-linux-x64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-linux
+          path: /tmp/ac-check/**/*.log
+          if-no-files-found: ignore
+
+  # macOS (Apple Silicon)。AppleClang は OpenMP を同梱しないが、
+  # OpenAcoustics は OpenMP 任意なのでシリアルビルドで検証する
+  # (スレッド数不変性の判定はシリアルでも無害に通る)。
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Validation tests (analytic solutions)
+        run: sh data/sample/acoustic_check.sh "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd" /tmp/ac-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofdx_acoustic_fdtd-macos-arm64
+          path: bin/ofdx_acoustic_fdtd
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf ofdx_acoustic_fdtd-macos-arm64.tar.gz -C bin ofdx_acoustic_fdtd
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofdx_acoustic_fdtd-macos-arm64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-macos
+          path: /tmp/ac-check/**/*.log
+          if-no-files-found: ignore
+
+  # Windows (MSVC + Ninja)。検証は Git Bash で同一スクリプトを実行する。
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Validation tests (analytic solutions)
+        shell: bash
+        run: sh data/sample/acoustic_check.sh "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd.exe" /tmp/ac-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofdx_acoustic_fdtd-windows-x64
+          path: bin/ofdx_acoustic_fdtd.exe
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Compress-Archive -Path bin/ofdx_acoustic_fdtd.exe -DestinationPath ofdx_acoustic_fdtd-windows-x64.zip
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofdx_acoustic_fdtd-windows-x64.zip
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-windows
+          path: /tmp/ac-check/**/*.log
+          if-no-files-found: ignore
+
+  # メモリ健全性の検証 (AddressSanitizer + UBSan + LeakSanitizer)。
+  # 解析解のチェックだけでは「値は合っているがメモリが壊れている / 漏れている」
+  # 状態を見逃す。場配列 (p/vx/vy/vz/マスク) はセル数に比例して大きくなるので、
+  # リークの有無は実用上も効く。-fno-sanitize-recover=all で UBSan も致命エラー。
+  sanitize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (ASan + UBSan)
+        run: >
+          cmake -B build-san -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-g -fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build-san -j"$(nproc)"
+
+      # LeakSanitizer を有効にして全検証ケースを流す。
+      # 解析解の判定もそのまま効くので、値の正しさとメモリ健全性を同時に見る。
+      - name: Validation tests under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: sh data/sample/acoustic_check.sh "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd" /tmp/ac-san
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-sanitize
+          path: /tmp/ac-san/**/*.log
+          if-no-files-found: ignore

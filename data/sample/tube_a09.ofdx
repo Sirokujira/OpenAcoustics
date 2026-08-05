@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 3, "name": "tube ends", "area": 0.0025, "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9], "air_a": 0.0 },
+      { "enabled": true, "role": 1, "name": "Ceiling",  "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
+      { "enabled": true, "role": 2, "name": "SideWall", "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
+      { "enabled": true, "role": 4, "name": "Floor",    "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 }
+    ]
+  }
+}

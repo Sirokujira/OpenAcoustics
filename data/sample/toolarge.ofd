@@ -1,0 +1,11 @@
+OpenFDTD 4 2
+title = acoustic check (f): grid over the 30M cell limit must fail honestly
+# 400 x 300 x 300 = 3.6e7 セル > 3.0e7 -> 配列を確保する前に非零終了し、
+# stderr にメッシュを粗くする案内を出す (合成 RIR は出さない)。
+xmesh = 0.0 400 4.0
+ymesh = 0.0 300 3.0
+zmesh = 0.0 300 3.0
+feed = z 2.005 1.505 1.505 1.0 0.0 50.0
+point = z 3.005 1.505 1.505
+frequency1 = 100.0
+end

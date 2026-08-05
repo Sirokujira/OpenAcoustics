@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 1, "name": "Ceiling",  "area": 12.0, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
+      { "enabled": true, "role": 2, "name": "SideWall", "area": 20.0, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
+      { "enabled": true, "role": 3, "name": "RearWall", "area": 15.0, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
+      { "enabled": true, "role": 4, "name": "Floor",    "area": 12.0, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 }
+    ]
+  }
+}

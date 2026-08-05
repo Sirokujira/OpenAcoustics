@@ -1,0 +1,6 @@
+# ビルド成果物はコミットしない (OpenFDTD 系共通規約)
+build*/
+bin/
+*.o
+*.obj
+*.gch
