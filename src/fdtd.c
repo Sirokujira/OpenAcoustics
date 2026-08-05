@@ -375,6 +375,16 @@ int ac_run(ac_t *ac)
 	const unsigned char *solid = ac->solid;
 	int n, i, j, k, r, prog_done = 0;
 
+	/* 実行条件を stdout にも 1 行出す。GUI のログ枠に見えるのは stdout だけで
+	 * (solver.log は作業ディレクトリのファイル)、進捗行の分母は
+	 * PROGRESS_TOTAL 固定なので、実際のステップ数がここに無いと
+	 * 「progress は 50 固定？」が分からない。 */
+	printf("solve: %d steps, %d cells, fs = %d Hz, %d receivers "
+	       "(進捗は %d 分割)\n",
+	       ac->nsteps, ac->nx * ac->ny * ac->nz, ac->fs, ac->nrecv,
+	       PROGRESS_TOTAL);
+	fflush(stdout);
+
 	for (n = 0; n < ac->nsteps; n++) {
 		/* ── v 更新 (内部面) : 面ごとに独立 — リダクションなし ── */
 #ifdef _OPENMP

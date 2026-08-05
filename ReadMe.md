@@ -40,8 +40,10 @@ ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]
   (無い / 複数あるときは非零終了 + stderr に理由)。
 - 同じ basename の `.ofdx` があれば吸音率を読む (無ければ全壁 α = 0.1)。
 - `mpiexec` 経由の起動も許容 (MPI 非対応 — 単プロセスとして動く)。
-- 進捗は stdout に `progress a/b` 行 (正規表現 `^progress\s+(\d+)\s*/\s*(\d+)$`、
-  50 分割)。
+- 進捗は stdout に `progress a/b` 行 (正規表現 `^progress\s+(\d+)\s*/\s*(\d+)$`)。
+  **分母は常に 50** (2% 刻み) で、時間ステップ数によらない — 行数を一定に保つ
+  ため。実際のステップ数・セル数・fs は実行開始時に stdout へ 1 行出す
+  (`solve: N steps, M cells, fs = ... Hz, ...`) ので GUI のログ枠で確認できる。
 - 異常時 (入力なし・格子過大など) は**非零終了コード + stderr へ明確な理由**。
   合成 RIR を捏造して正常終了することはない。
 
