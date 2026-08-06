@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 4, "name": "Floor",    "area": 96.0, "alpha": [0.10, 0.12, 0.16, 0.20, 0.24, 0.30], "air_a": 0.0 },
+      { "enabled": true, "role": 1, "name": "Ceiling",  "area": 96.0, "alpha": [0.06, 0.08, 0.10, 0.10, 0.12, 0.14], "air_a": 0.0 },
+      { "enabled": true, "role": 2, "name": "SideWall", "area": 96.0, "alpha": [0.10, 0.10, 0.12, 0.12, 0.14, 0.14], "air_a": 0.0 },
+      { "enabled": true, "role": 3, "name": "RearWall", "area": 64.0, "alpha": [0.14, 0.16, 0.20, 0.22, 0.24, 0.24], "air_a": 0.0 }
+    ],
+    "receivers": [
+      { "enabled": true, "name": "blocked",  "x": 10.0, "y": 4.0, "z": 2.0 },
+      { "enabled": true, "name": "clear",    "x": 10.0, "y": 1.0, "z": 2.0 }
+    ],
+    "ga": {
+      "image_order": 3,
+      "rays": 8000
+    }
+  }
+}

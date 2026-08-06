@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 
 project(OpenAcoustics
-  DESCRIPTION "Room-acoustics FDTD solver kernel for OpenFDTD-X (ADR-0007 contract)"
+  DESCRIPTION "Room-acoustics solver kernels for OpenFDTD-X (ADR-0007 contract): FDTD (low band) + geometric acoustics (high band)"
   LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
@@ -52,3 +52,22 @@ else()
 endif()
 
 target_link_libraries(ofdx_acoustic_fdtd PRIVATE ${MATH_LIB})
+
+# ── 幾何音響ソルバー (高域担当) ───────────────────────────────────
+# FDTD (低域) とは完全に独立した別バイナリ。共有するのは src/wav.c だけで、
+# そのために必要な ac_fopen は src/ga_main.c が定義する (main.c は使わない)。
+# OpenMP は使わない : レイのエコーグラム加算はリダクションになり、
+# スレッド数によるビット一致を壊すため (CLAUDE.md の決定性の規則)。
+add_executable(ofdx_acoustic_ga
+    src/ga_main.c
+    src/ga_input.c
+    src/ga_ofdx.c
+    src/ga_setup.c
+    src/ga_trace.c
+    src/ga_synth.c
+    src/ga_json.c
+    src/wav.c
+)
+
+target_include_directories(ofdx_acoustic_ga PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(ofdx_acoustic_ga PRIVATE ${MATH_LIB})
