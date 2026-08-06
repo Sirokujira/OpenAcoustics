@@ -1,4 +1,7 @@
 # OpenAcoustics CI — 3 OS でビルド + 解析解との検証 (data/sample/acoustic_check.sh)。
+# ソルバーは 2 本 (低域 = ofdx_acoustic_fdtd、高域 = ofdx_acoustic_ga) で、
+# 検証スクリプトは 1 本で両方を判定する (第 3 引数を省略すると実行ファイル名の
+# fdtd -> ga 置換で幾何音響ソルバーを見つける)。
 # OpenPEEC の ci.yml を踏襲。依存ライブラリなし (OpenMP は任意) のため
 # vcpkg/HDF5 等の手順は不要。検証スクリプトは 3 OS とも同一の POSIX sh を使う
 # (Windows は Git Bash)。
@@ -29,7 +32,7 @@ jobs:
       - name: Validation tests (analytic solutions)
         run: sh data/sample/acoustic_check.sh "$GITHUB_WORKSPACE/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 
-      - name: E2E smoke (concert-hall scale)
+      - name: E2E smoke (concert-hall scale, FDTD)
         run: |
           mkdir -p /tmp/ac-hall
           cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-hall/
@@ -37,21 +40,34 @@ jobs:
           grep "normal end" /tmp/ac-hall/solver.log
           test -s /tmp/ac-hall/rir.wav && test -s /tmp/ac-hall/rir_balcony.wav
 
+      # 幾何音響は同じ .ofd/.ofdx をそのまま読む (高域担当なので出力 fs は 48 kHz 固定)。
+      - name: E2E smoke (concert-hall scale, geometric acoustics)
+        run: |
+          mkdir -p /tmp/ga-hall
+          cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-hall/
+          "$GITHUB_WORKSPACE/bin/ofdx_acoustic_ga" /tmp/ga-hall | grep -Ec "^progress [0-9]+/[0-9]+$"
+          grep "normal end" /tmp/ga-hall/solver.log
+          grep -q '"sample_rate": 48000' /tmp/ga-hall/metadata.json
+          grep -q '"valid_band_hz"' /tmp/ga-hall/metadata.json
+          test -s /tmp/ga-hall/rir.wav && test -s /tmp/ga-hall/rir_balcony.wav
+
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: ofdx_acoustic_fdtd-linux-x64
-          path: bin/ofdx_acoustic_fdtd
+          name: ofdx_acoustic-linux-x64
+          path: |
+            bin/ofdx_acoustic_fdtd
+            bin/ofdx_acoustic_ga
 
       - name: Package for release
         if: startsWith(github.ref, 'refs/tags/v')
-        run: tar czf ofdx_acoustic_fdtd-linux-x64.tar.gz -C bin ofdx_acoustic_fdtd
+        run: tar czf ofdx_acoustic-linux-x64.tar.gz -C bin ofdx_acoustic_fdtd ofdx_acoustic_ga
 
       - name: Attach binaries to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ofdx_acoustic_fdtd-linux-x64.tar.gz
+          files: ofdx_acoustic-linux-x64.tar.gz
 
       - name: Upload logs on failure
         if: failure()
@@ -84,18 +100,20 @@ jobs:
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: ofdx_acoustic_fdtd-macos-arm64
-          path: bin/ofdx_acoustic_fdtd
+          name: ofdx_acoustic-macos-arm64
+          path: |
+            bin/ofdx_acoustic_fdtd
+            bin/ofdx_acoustic_ga
 
       - name: Package for release
         if: startsWith(github.ref, 'refs/tags/v')
-        run: tar czf ofdx_acoustic_fdtd-macos-arm64.tar.gz -C bin ofdx_acoustic_fdtd
+        run: tar czf ofdx_acoustic-macos-arm64.tar.gz -C bin ofdx_acoustic_fdtd ofdx_acoustic_ga
 
       - name: Attach binaries to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ofdx_acoustic_fdtd-macos-arm64.tar.gz
+          files: ofdx_acoustic-macos-arm64.tar.gz
 
       - name: Upload logs on failure
         if: failure()
@@ -130,18 +148,20 @@ jobs:
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: ofdx_acoustic_fdtd-windows-x64
-          path: bin/ofdx_acoustic_fdtd.exe
+          name: ofdx_acoustic-windows-x64
+          path: |
+            bin/ofdx_acoustic_fdtd.exe
+            bin/ofdx_acoustic_ga.exe
 
       - name: Package for release
         if: startsWith(github.ref, 'refs/tags/v')
-        run: Compress-Archive -Path bin/ofdx_acoustic_fdtd.exe -DestinationPath ofdx_acoustic_fdtd-windows-x64.zip
+        run: Compress-Archive -Path bin/ofdx_acoustic_fdtd.exe, bin/ofdx_acoustic_ga.exe -DestinationPath ofdx_acoustic-windows-x64.zip
 
       - name: Attach binaries to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ofdx_acoustic_fdtd-windows-x64.zip
+          files: ofdx_acoustic-windows-x64.zip
 
       - name: Upload logs on failure
         if: failure()
@@ -152,6 +172,8 @@ jobs:
           if-no-files-found: ignore
 
   # メモリ健全性の検証 (AddressSanitizer + UBSan + LeakSanitizer)。
+  # 幾何音響ソルバーも同じスクリプトで流れる (FFT 作業配列・エコーグラム・
+  # バンド別信号はいずれもサンプル数に比例するのでリーク検査が効く)。
   # 解析解のチェックだけでは「値は合っているがメモリが壊れている / 漏れている」
   # 状態を見逃す。場配列 (p/vx/vy/vz/マスク) はセル数に比例して大きくなるので、
   # リークの有無は実用上も効く。-fno-sanitize-recover=all で UBSan も致命エラー。

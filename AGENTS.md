@@ -1,11 +1,23 @@
-# AGENTS.md — OpenAcoustics (ofdx_acoustic_fdtd)
+# AGENTS.md — OpenAcoustics (ofdx_acoustic_fdtd / ofdx_acoustic_ga)
 
-OpenFDTD-X (GUI) の室内音響用外部 FDTD ソルバー (C11)。
-3 次元線形音響のスタガード格子 FDTD で部屋のインパルス応答 (RIR) を計算し、
-ADR-0007 のファイル契約 (rir.wav / metadata.json / metrics.json / solver.log)
-で GUI に返す。OpenPEEC の姉妹プロジェクトで、ビルド規約・移植性規則を
-共有する。外部ライブラリに依存しない (C11 + CMake、OpenMP のみ任意。
-WAV / JSON は自前実装 — 追加しないこと)。
+OpenFDTD-X (GUI) の室内音響用外部ソルバー (C11)。部屋のインパルス応答
+(RIR) を計算し、ADR-0007 のファイル契約 (rir.wav / metadata.json /
+metrics.json / solver.log) で GUI に返す。**バイナリは 2 本**ある。
+
+| バイナリ | 担当 | 手法 |
+|---|---|---|
+| `ofdx_acoustic_fdtd` | 低域 | 3 次元線形音響のスタガード格子 FDTD |
+| `ofdx_acoustic_ga` | 高域 | 幾何音響 (鏡像法 + 光線追跡) |
+
+FDTD の上限は fmax = c/(10·dx) で、ホール規模で 4 kHz を得るのは原理的に
+不可能なため、**低域 = FDTD / 高域 = 幾何音響**のハイブリッドにしている。
+**帯域分割・両者の合成は GUI (OpenFDTD-X) 側の担当**で、ここではやらない。
+2 本は独立したバイナリで、共有するソースは `src/wav.c` だけ。
+**FDTD 側のコードに幾何音響の都合で手を入れないこと** (逆も同じ)。
+
+OpenPEEC の姉妹プロジェクトで、ビルド規約・移植性規則を共有する。
+外部ライブラリに依存しない (C11 + CMake、OpenMP のみ任意。
+WAV / JSON / FFT は自前実装 — 追加しないこと)。
 
 > このファイルは Claude Code 用の `CLAUDE.md` と同じ内容を単独で読める形に
 > まとめたもの。**片方だけ直すと食い違うので、規約を変えたら両方直すこと。**
@@ -14,23 +26,28 @@ WAV / JSON は自前実装 — 追加しないこと)。
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
+cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 40 判定 (モード周波数 / 反射係数 / 到達時刻 /
-# エネルギー保存 / T_Sabine / 決定性 / 契約 / 異常系)
+# 検証 : 解析解との比較 81 判定 (FDTD 40 + 幾何音響 41)。1 本のスクリプトが
+# 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
+# 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 
-# E2E (ホール規模 20x15x10 m、約 2 秒)
+# E2E (ホール規模 20x15x10 m。同じ .ofd を両ソルバーが読める)
 mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-hall/
 ./bin/ofdx_acoustic_fdtd /tmp/ac-hall && grep "normal end" /tmp/ac-hall/solver.log
+mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-hall/
+./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**40 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**81 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
 
 ## ソース構成
+
+**ofdx_acoustic_fdtd (低域)**
 
 | ファイル | 役割 |
 |---|---|
@@ -39,10 +56,28 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
 | `src/input_ofd.c` | `.ofd` パーサ (OpenFDTD 互換、未知キーは無視) と入力探索 |
 | `src/input_ofdx.c` | `.ofdx` (JSON サイドカー) の tolerant scanner — 必要キーのみ読む |
 | `src/fdtd.c` | setup (格子/音源設計/境界係数/ボクセル化) と leapfrog 本体 |
-| `src/wav.c` | float32 モノラル WAV 書き出し (44 byte ヘッダ) |
 | `src/jsonout.c` | metadata.json / metrics.json |
 
-## 物理不変条件 (壊すと結果が静かに狂う — 番人は acoustic_check.sh)
+**ofdx_acoustic_ga (高域)**
+
+| ファイル | 役割 |
+|---|---|
+| `include/ga.h` | コンテキスト構造体 `ga_t` と全定数 (バンド, fs, 既定値) |
+| `src/ga_main.c` | エントリ。ログ (`ga_log`/`ga_err`) と `ac_fopen` の定義 |
+| `src/ga_input.c` | `.ofd` パーサ (幾何音響が使う部分集合) と入力探索 |
+| `src/ga_ofdx.c` | `.ofdx` の tolerant scanner (バンド別 α と `acoustic.ga`) |
+| `src/ga_setup.c` | 室/境界/ISO 9613-1 空気吸収/Eyring/時間軸/確保 |
+| `src/ga_trace.c` | 鏡像法 (可視性判定つき) と光線追跡 (エコーグラム) |
+| `src/ga_synth.c` | 分数遅延の反射配置、バンド重み、自前 radix-2 FFT、RIR 合成 |
+| `src/ga_json.c` | metadata.json / metrics.json |
+
+**共有**
+
+| ファイル | 役割 |
+|---|---|
+| `src/wav.c` | float32 モノラル WAV 書き出し (44 byte ヘッダ)。両ターゲットに入る。必要な `ac_fopen` は `main.c` と `ga_main.c` がそれぞれ定義する (別バイナリなので衝突しない) |
+
+## FDTD (ofdx_acoustic_fdtd) の物理不変条件 (壊すと結果が静かに狂う)
 
 1. **CFL**: fs = ceil(c·√3/(0.99·dx)) — CFL を満たす**最小の整数** Hz。
    変えると box_modes の fs 判定 (独立に同式で計算) が落ちる。
@@ -62,6 +97,47 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
    (こちらだけ先に変えない)。metadata.json はキー追加のみ可 (削除・改名禁止)。
 6. **数値を捏造しない**: 入力が読めない・feed/point が無い・セル総数 > 3000 万
    は非零終了 + stderr に理由。合成 RIR を出して正常終了しない。
+
+## 幾何音響 (ofdx_acoustic_ga) の不変条件 — 番人は acoustic_check.sh の (A)〜(G)
+
+1. **振幅規約**: 自由音場の直接音が **1/(4πr)**。離散 RIR ではこれを
+   「到達の標本和 (単位標本利得)」として実現する。反射は 3 次ラグランジュ
+   分数遅延 (4 タップ) で置くので標本和 = 振幅・1 次モーメント = 到達時刻が
+   厳密。**FDTD 側と合成するときの共通規約なので変えてはいけない** ((A)(B))。
+2. **時間原点**: **t = 0 が音源発火時刻**。直接音は t = r/c。metadata の
+   `t0_s` は常に 0。遅延を入れると GUI 側の合成が壊れる ((A)(B)(G))。
+3. **出力 fs = 48000 Hz 固定**。metadata の `sample_rate` と WAV ヘッダの
+   両方に出る ((G))。
+4. **バンド重みは単位分割**: Σ_b W_b(f) = 1 かつ W_b(fc_b') = δ。前者が
+   無損失ケースのエネルギー保存 ((E)) を、後者がバンド中心の DFT 読み取り
+   ((D)) を支えている。零位相 (実数重み) なので群遅延 0 — ここに位相を
+   持ち込むと (2) が壊れる。
+5. **決定性**: 乱数生成器を使わない。レイ方向は球面フィボナッチ格子、
+   拡散反射の抽選は固定の 32 bit 整数ハッシュ、後期残響の符号列は固定
+   初期値の LFSR。**OpenMP は使わない** (エコーグラム加算がリダクションに
+   なりビット一致を壊すため)。並列化するならビット一致の主張ごと見直すこと ((F))。
+   準乱数列 (Halton) を拡散反射に使ってはいけない — 直方体の反射列と共鳴して
+   平均自由行程が 4V/S から +4.8% ずれ、残響時間がそのまま狂う (実測済み)。
+6. **二重計上の禁止**: 鏡像法が受け持つのは「次数 order 以下・障害物に
+   当たらない・一度も拡散していない鏡面経路」だけで、レイ側はその条件を
+   外れた経路のみ検出する。散乱係数 s のぶんは鏡像の振幅から (1−s)^(n/2)
+   で抜き、抜けた分をレイが受け持つ。どちらかを変えるなら両方直すこと。
+7. **空気吸収は ISO 9613-1**。実装は ISO 9613-2:1996 Table 2 の
+   10 ℃/70 %RH 行 (0.4/1.0/1.9/3.7/9.7/32.8/117 dB/km) と 20 ℃/70 %RH 行
+   (0.3/1.1/2.8/5.0/9.0/22.9/76.6) を再現することで検証してある。
+   温度・湿度は**空気吸収にのみ**使い、音速は FDTD 側と揃えて 343.0 m/s 固定。
+8. **残響時間は Eyring と一致しない前提で扱う**: 吸音が一様な直方体では
+   初期減衰率が一致するだけで、後半は場が混合せず緩くなる。吸音が偏った室
+   (客席床だけ吸音が大きいホール等) では Eyring より 10〜40% 長く出る
+   (散乱係数で縮む)。これは実装の誤差ではなく幾何音響の物理なので、
+   Eyring に合わせるために減衰を細工しないこと。検証 (C) が初期減衰率で
+   比較しているのはこのため。
+9. **有効帯域を偽らない**: metadata の `valid_band_hz` は
+   [Schroeder 周波数, min(fs/2, 8 kHz バンド上端 = 11313.7 Hz)]。
+   下限より下・上限より上の値を「使える」と書かないこと。
+10. **数値を捏造しない**: 室外/剛体内の音源・受音点、`.ofdx` の値域外
+   (`image_order` = 9 等) は非零終了 + stderr に理由。既定値に黙って
+   落とさない ((G))。
 
 ## 移植性の絶対規則 (OpenPEEC portability.md を踏襲 — MSVC で実際に踏んだもの)
 
@@ -95,6 +171,16 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
   期待値は**コードと独立な出所** (教科書の公式・解析解) にすること。
   `.ofd` の先頭コメントに導出・許容誤差の根拠を書く。
 - 既定値は「キー省略時に従来動作と完全一致」(後方互換)。
+- 幾何音響側も同じ規約 : グローバル変数禁止、状態は `ga_t` 1 個、確保した
+  メモリは `ga_free()` で必ず解放する (`ga_t` に動的メンバを足したらここにも
+  足す)。エコーグラム・バンド別信号・FFT 作業配列はサンプル数に比例して
+  大きくなるので、LeakSanitizer の検査が実用上も効く。
+- 幾何音響の拡張は `.ofdx` の `acoustic.ga` に足す (未知キー無視を保つ)。
+  FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
+  両ソルバーで共有できる。**この性質を壊さないこと**。
+- 幾何音響で未対応のもの (非直方体の室・障害物の低次鏡面反射・面別/バンド別
+  散乱係数・回折・角度依存吸音) は ReadMe の「幾何音響の制約」に書いてある。
+  実装したら制約表からも消すこと。
 - 未実装を実装済みと偽らない: 対応できない入力 (AABB 近似・複数 feed・
   非一様メッシュ) は solver.log に warning を明示する。
 
@@ -103,5 +189,6 @@ mkdir -p /tmp/ac-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ac-h
 `.github/workflows/ci.yml`: Linux / macOS / Windows (MSVC + Ninja) の 3 OS +
 `sanitize` (Linux, ASan + UBSan + LeakSanitizer)。検証スクリプトは全ジョブとも
 同一の `data/sample/acoustic_check.sh` を `shell: bash` (Windows は Git Bash)
-で実行する。Linux はホール規模の E2E スモークも実行。
-タグ `v*` push で Release にバイナリ添付。
+で実行し、**2 本のソルバーを 1 回で判定する**。Linux はホール規模の E2E
+スモークを両ソルバーで実行。タグ `v*` push で Release に**両方の**バイナリを
+添付する (`ofdx_acoustic-<os>-<arch>` の 1 アーカイブにまとめる)。

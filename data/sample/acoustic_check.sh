@@ -1,10 +1,10 @@
 #!/bin/sh
-# acoustic_check.sh — ofdx_acoustic_fdtd 検証 (CI 用、OpenPEEC peec_check.sh の流儀)
+# acoustic_check.sh — ソルバー 2 本の検証 (CI 用、OpenPEEC peec_check.sh の流儀)
 #
 # data/sample/ の各ケースを実行し、rir.wav を解析解と比較する。
 # 期待値の導出は各 .ofd ファイルのコメント参照 (すべて実装から独立な解析解)。
 #
-# 判定 :
+# ── ofdx_acoustic_fdtd (低域担当、FDTD) の判定 :
 #  (a) 剛体閉箱 4x3x2.5 m の軸モード f_100/f_010/f_001 が ±3% (走査 DFT)
 #  (b) 準 1D 管の端面反射 R = sqrt(1-alpha) が ±3% (alpha=0.3, 0.9)
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
@@ -12,11 +12,24 @@
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
 #
+# ── ofdx_acoustic_ga (高域担当、幾何音響) の判定 :
+#  (A) 自由音場 : 直接音の時刻 t = r/c と振幅 1/(4 pi r) が ±1%
+#  (B) 剛体床 1 枚 : 直接音 + 1 次反射の 2 発が鏡像法の閉形式と ±1%
+#  (C) 直方体箱 : バンド別 T60 (500 Hz / 4 kHz) が Eyring 式と ±5%
+#  (D) 空気吸収 : 100 m・4 kHz の超過減衰が ISO 9613-2 Table 2 と ±0.5 dB
+#  (E) 全 alpha=0 + 空気吸収 off : エコーグラムが減衰しない (< 0.5 dB)
+#  (F) 決定性 : 再実行 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
+#  (G) 契約 : 出力ファイル、WAV ヘッダ (48 kHz)、progress 行書式、
+#      metadata の valid_band_hz、遮蔽・近似の warning、異常系の非零終了
+#
 # WAV の読みは od -t f4 (float32 リトルエンディアン)。CI の 3 OS
 # (Linux / macOS / Windows Git Bash) はいずれもリトルエンディアンかつ
 # coreutils/BSD od が -j/-t f4 に対応している。
 #
-# 使い方 : acoustic_check.sh <ofdx_acoustic_fdtd 実行ファイル(絶対パス)> [作業ディレクトリ]
+# 使い方 :
+#   acoustic_check.sh <ofdx_acoustic_fdtd(絶対パス)> [作業ディレクトリ] [<ofdx_acoustic_ga>]
+# 第 3 引数を省略すると第 1 引数のファイル名の "fdtd" を "ga" に置き換えた
+# パスを使う (.exe も含めて解決できる)。
 
 set -e
 
@@ -26,8 +39,13 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 PI=3.14159265358979
 
 if [ -z "$SOLVER" ]; then
-	echo "Usage: acoustic_check.sh <ofdx_acoustic_fdtd> [workdir]" >&2
+	echo "Usage: acoustic_check.sh <ofdx_acoustic_fdtd> [workdir] [ofdx_acoustic_ga]" >&2
 	exit 2
+fi
+
+GA_SOLVER="${3:-}"
+if [ -z "$GA_SOLVER" ]; then
+	GA_SOLVER=$(printf '%s' "$SOLVER" | sed 's/ofdx_acoustic_fdtd/ofdx_acoustic_ga/')
 fi
 
 mkdir -p "$WORK"
@@ -56,6 +74,19 @@ chk() {
 		exit (ad <= tol) ? 0 : 1
 	}' || status=1
 }
+
+# chkabs <label> <actual> <expected> <tol(絶対)> <単位>
+chkabs() {
+	awk -v a="$2" -v e="$3" -v tol="$4" -v u="$5" -v lb="$1" 'BEGIN {
+		d = a - e; ad = (d < 0) ? -d : d;
+		printf "%-26s actual=%.6g expected=%.6g -> %s %+.4f %s\n", lb, a, e, (ad <= tol) ? "OK" : "NG", d, u;
+		exit (ad <= tol) ? 0 : 1
+	}' || status=1
+}
+
+# ok <label> <条件の真偽 (0=真)> : grep 等の結果をそのまま判定にする
+say_ok() { printf "%-26s -> OK%s\n" "$1" "${2:-}"; }
+say_ng() { printf "%-26s -> NG%s\n" "$1" "${2:-}" >&2; status=1; }
 
 # WAV の float32 サンプル列を 1 行 1 値で dump (44 byte 標準ヘッダ想定)
 dump() {
@@ -283,6 +314,278 @@ if "$SOLVER" > /dev/null 2>&1; then
 	printf "%-26s -> NG (should fail)\n" "usage exit" >&2; status=1
 else
 	printf "%-26s -> OK\n" "usage exit"
+fi
+
+###############################################################################
+# ofdx_acoustic_ga (幾何音響、高域担当) の検証
+#
+# 振幅規約 : 自由音場の直接音が 1/(4 pi r)。離散 RIR ではこれを
+# 「到達近傍の標本和 (= 単位標本利得)」として測る — 3 次ラグランジュ分数
+# 遅延で置いているので標本和と 1 次モーメントが厳密に一致する。
+# 時間原点 : t = 0 が音源発火時刻。標本 n の時刻は n/fs (fs = 48000 固定)。
+###############################################################################
+echo ""
+echo "=== ofdx_acoustic_ga (geometric acoustics, high band) ==="
+
+if [ ! -x "$GA_SOLVER" ] && [ ! -f "$GA_SOLVER" ]; then
+	echo "*** ga solver not found: $GA_SOLVER" >&2
+	status=1
+fi
+
+ga_run() {
+	_name="$1"; shift
+	_dir="$WORK/$_name"
+	rm -rf "$_dir"
+	mkdir -p "$_dir"
+	for _f in "$@"; do cp "$SRC/$_f" "$_dir/"; done
+	if "$GA_SOLVER" "$_dir" > "$_dir/stdout.log" 2> "$_dir/stderr.log"; then :; else
+		echo "*** $_name: ga solver failed (see $_dir/stderr.log)" >&2
+		status=1
+		return 1
+	fi
+}
+
+# ga_sum <wavのdumpファイル> <中心時刻[s]> <半幅[s]> : 窓内の標本和 (= 振幅)
+ga_sum() {
+	awk -v fs=48000 -v tc="$2" -v hw="$3" '
+		{ t = (NR - 1) / fs; if (t > tc - hw && t < tc + hw) s += $1 }
+		END { printf "%.10e", s }' "$1"
+}
+# ga_peak <dump> <中心時刻> <半幅> : 窓内で |p| が最大になる時刻 [s]
+ga_peak() {
+	awk -v fs=48000 -v tc="$2" -v hw="$3" '
+		{ t = (NR - 1) / fs; a = ($1 < 0) ? -$1 : $1;
+		  if (t > tc - hw && t < tc + hw && a > pk) { pk = a; tp = t } }
+		END { printf "%.10e", tp }' "$1"
+}
+# ga_mag <dump> <周波数[Hz]> : その周波数の DFT 振幅
+#   バンド重みはオクターブ中心を節点とする単位分割ハットなので、
+#   f = バンド中心では他バンドが 0 になりそのバンドの利得だけが読める。
+ga_mag() {
+	awk -v fs=48000 -v f0="$2" -v pi="$PI" '
+		{ s[NR-1] = $1; n = NR }
+		END {
+			w = 2 * pi * f0 / fs;
+			for (i = 0; i < n; i++) { cr += s[i] * cos(w * i); ci -= s[i] * sin(w * i) }
+			printf "%.10e", sqrt(cr * cr + ci * ci)
+		}' "$1"
+}
+# ga_t60 <dump> <中心周波数> : バンドパス -> Schroeder 逆積分 ->
+#   -5 .. -15 dB の最小二乗直線の傾きから T60 [s]。
+#   バンドパスは RBJ の 2 次 (定 0 dB ピーク利得) を 2 段。Q = 2.5。
+#   -25 dB まで使わない理由は ga_t60.ofd の先頭コメント参照
+#   (鏡面直方体の減衰は指数関数の重ね合わせで対数軸に凸 = 後半が緩い)。
+ga_t60() {
+	awk -v fs=48000 -v f0="$2" -v Q=2.5 -v pi="$PI" '
+		{ x[NR-1] = $1; n = NR }
+		END {
+			w0 = 2 * pi * f0 / fs; al = sin(w0) / (2 * Q); cw = cos(w0);
+			b0 = al / (1 + al); b2 = -al / (1 + al);
+			a1 = (-2 * cw) / (1 + al); a2 = (1 - al) / (1 + al);
+			for (p = 0; p < 2; p++) {
+				z1 = 0; z2 = 0; y1 = 0; y2 = 0;
+				for (i = 0; i < n; i++) {
+					v = x[i];
+					y = b0 * v + b2 * z2 - a1 * y1 - a2 * y2;
+					z2 = z1; z1 = v; y2 = y1; y1 = y; x[i] = y;
+				}
+			}
+			s = 0;
+			for (i = n - 1; i >= 0; i--) { s += x[i] * x[i]; S[i] = s }
+			if (S[0] <= 0) { printf "-1"; exit }
+			for (i = 0; i < n; i++) {
+				db = 10 * log(S[i] / S[0]) / log(10);
+				if (db <= -5 && db >= -15) {
+					t = i / fs; sx += t; sy += db; sxx += t * t; sxy += t * db; m++
+				}
+			}
+			if (m < 100) { printf "-1"; exit }
+			slope = (m * sxy - sx * sy) / (m * sxx - sx * sx);
+			printf "%.10e", -60 / slope
+		}' "$1"
+}
+
+echo "--- (G) ga contract: free-field case (explicit input file name)"
+d="$WORK/ga_freefield"
+rm -rf "$d"; mkdir -p "$d"
+cp "$SRC/ga_freefield.ofd" "$SRC/ga_freefield.ofdx" "$d/"
+if "$GA_SOLVER" "$d" ga_freefield.ofd > "$d/stdout.log" 2> "$d/stderr.log"; then
+	say_ok "ga_freefield run"
+else
+	say_ng "ga_freefield run" " (solver failed)"
+fi
+for f in rir.wav rir_near.wav rir_far.wav metadata.json metrics.json solver.log; do
+	if [ -s "$d/$f" ]; then say_ok "ga exists: $f"; else say_ng "ga exists: $f" " (missing)"; fi
+done
+grep -q "normal end" "$d/solver.log" || { echo "*** no 'normal end' in ga solver.log" >&2; status=1; }
+chk "ga metadata sample_rate" "$(grep '"sample_rate"' "$d/metadata.json" | tr -dc '0-9')" 48000 0
+chk "ga metadata contract_ver" "$(grep '"contract_version"' "$d/metadata.json" | tr -dc '0-9')" 1 0
+# 有効帯域の上端は 8 kHz バンドの上端 8000*sqrt(2) = 11313.7 Hz (ナイキスト未満)
+chk "ga valid_band upper" \
+	"$(sed -n 's/.*"valid_band_hz": \[[^,]*, \([0-9.e+-]*\)\].*/\1/p' "$d/metadata.json")" \
+	"$(awk 'BEGIN{print 8000*sqrt(2)}')" 0.001
+# 時間原点の規約 : t0_s = 0 (音源発火時刻)
+grep -q '"t0_s": 0' "$d/metadata.json" && say_ok "ga time origin t0_s=0" \
+	|| say_ng "ga time origin t0_s=0"
+[ "$(tag4 "$d/rir.wav" 0)" = "RIFF" ] && [ "$(tag4 "$d/rir.wav" 8)" = "WAVE" ] \
+	&& say_ok "ga wav RIFF/WAVE tags" || say_ng "ga wav RIFF/WAVE tags"
+chk "ga wav format tag (float)" "$(u16 "$d/rir.wav" 20)" 3 0
+chk "ga wav channels" "$(u16 "$d/rir.wav" 22)" 1 0
+chk "ga wav bits" "$(u16 "$d/rir.wav" 34)" 32 0
+chk "ga wav sample rate" "$(u32 "$d/rir.wav" 24)" 48000 0
+size=$(wc -c < "$d/rir.wav" | tr -d ' \t')
+chk "ga wav data size field" "$(u32 "$d/rir.wav" 40)" "$(awk -v s="$size" 'BEGIN{print s-44}')" 0
+chk "ga wav riff size field" "$(u32 "$d/rir.wav" 4)" "$(awk -v s="$size" 'BEGIN{print s-8}')" 0
+nprog=$(grep -c "progress" "$d/stdout.log" || true)
+ngood=$(grep -Ec "^progress [0-9]+/[0-9]+$" "$d/stdout.log" || true)
+if [ "$nprog" -ge 10 ] && [ "$nprog" = "$ngood" ]; then
+	printf "%-26s -> OK (%d lines)\n" "ga progress format" "$nprog"
+else
+	printf "%-26s -> NG (progress=%s well-formed=%s)\n" "ga progress format" "$nprog" "$ngood" >&2
+	status=1
+fi
+
+echo "--- (A) free field: direct sound t = r/c and amplitude 1/(4 pi r) (+-1%)"
+# 導出は ga_freefield.ofd の先頭コメント。r = 10 m、c = 343 m/s。
+dump "$d/rir.wav" > "$d/near.txt"
+dump "$d/rir_far.wav" > "$d/far.txt"
+t_dir=$(awk 'BEGIN{printf "%.10f", 10.0/343.0}')
+chk "ga direct amplitude" "$(ga_sum "$d/near.txt" "$t_dir" 0.001)" \
+	"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*10.0)}')" 0.01
+chk "ga direct arrival [s]" "$(ga_peak "$d/near.txt" "$t_dir" 0.001)" "$t_dir" 0.01
+
+echo "--- (D) air absorption at 4 kHz over 100 m (ISO 9613-2 Table 2, +-0.5 dB)"
+# 10 degC / 70 %RH / 101.325 kPa の 4 kHz は 32.8 dB/km = 0.0328 dB/m。
+# 距離減衰 1/(4 pi r) を外した超過減衰 = a (r2 - r1) = 3.28 dB。
+m1=$(ga_mag "$d/near.txt" 4000)
+m2=$(ga_mag "$d/far.txt" 4000)
+chkabs "ga air 4 kHz / 100 m" \
+	"$(awk -v a="$m1" -v b="$m2" 'BEGIN{printf "%.6f", 20*log(a*10.0/(b*110.0))/log(10)}')" \
+	3.28 0.5 dB
+
+echo "--- (B) rigid floor: direct + 1st-order image (+-1%)"
+# r0 = sqrt(32) = 5.65685425 m、r1 = sqrt(52) = 7.21110255 m (ga_floor.ofd 参照)
+ga_run ga_floor ga_floor.ofd ga_floor.ofdx && {
+	d="$WORK/ga_floor"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	for k in 0 1; do
+		r=$(awk -v k=$k 'BEGIN{printf "%.10f", (k==0)?sqrt(32):sqrt(52)}')
+		te=$(awk -v r="$r" 'BEGIN{printf "%.10f", r/343.0}')
+		chk "ga floor #$k amplitude" "$(ga_sum "$d/rir.txt" "$te" 0.0015)" \
+			"$(awk -v r="$r" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+		chk "ga floor #$k arrival [s]" "$(ga_peak "$d/rir.txt" "$te" 0.0015)" "$te" 0.01
+	done
+}
+
+echo "--- (C) band T60 of a 10 m cube vs the Eyring formula (+-5%)"
+# 期待値は ga_t60.ofd の先頭コメントの手計算 (Eyring + 空気吸収 4mV、
+# 空気吸収係数は ISO 9613-2 Table 2 の 10 degC / 70 %RH の行)。
+ga_run ga_t60 ga_t60.ofd ga_t60.ofdx && {
+	d="$WORK/ga_t60"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	chk "ga T60 500 Hz [s]"  "$(ga_t60 "$d/rir.txt" 500)"  2.4782 0.05
+	chk "ga T60 4 kHz [s]"   "$(ga_t60 "$d/rir.txt" 4000)" 1.1942 0.05
+}
+
+echo "--- (E) lossless room (alpha = 0, air absorption off): no decay (< 0.5 dB)"
+ga_run ga_lossless ga_lossless.ofd ga_lossless.ofdx && {
+	d="$WORK/ga_lossless"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	awk -v fs=48000 '
+		{ t = (NR - 1) / fs; s = $1;
+		  if (t >= 0.30 && t < 0.60) e1 += s * s;
+		  else if (t >= 0.60 && t < 0.90) e2 += s * s }
+		END {
+			db = 10 * log(e1 / e2) / log(10); ad = (db < 0) ? -db : db;
+			printf "%-26s decay=%.4f dB -> %s (<= 0.5 dB)\n", "ga lossless energy", db, (ad <= 0.5) ? "OK" : "NG";
+			exit (ad <= 0.5) ? 0 : 1
+		}' "$d/rir.txt" || status=1
+}
+
+echo "--- (G) occlusion by rigid obstacles + honest warnings"
+ga_run ga_pillar ga_pillar.ofd ga_pillar.ofdx && {
+	d="$WORK/ga_pillar"
+	grep -q "normal end" "$d/solver.log" && say_ok "ga_pillar normal end" \
+		|| say_ng "ga_pillar normal end"
+	grep -q "warning: 2 feeds" "$d/solver.log" && say_ok "ga multi-feed warning" \
+		|| say_ng "ga multi-feed warning"
+	grep -q "AABB" "$d/solver.log" && say_ok "ga AABB approx warning" \
+		|| say_ng "ga AABB approx warning"
+	# 受音点 #1 は衝立で直接音が遮られ、#2 は遮られない (導出は ga_pillar.ofd)
+	dump "$d/rir.wav" > "$d/blocked.txt"
+	dump "$d/rir_clear.wav" > "$d/clear.txt"
+	tb=$(awk 'BEGIN{printf "%.10f", 8.0/343.0}')
+	tc=$(awk 'BEGIN{printf "%.10f", sqrt(73.0)/343.0}')
+	awk -v a="$(ga_sum "$d/blocked.txt" "$tb" 0.0008)" -v pi="$PI" 'BEGIN {
+		ref = 1/(4*pi*8.0); r = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/free-field=%.4f -> %s (< 0.05)\n", "ga occluded direct", r, (r < 0.05) ? "OK" : "NG";
+		exit (r < 0.05) ? 0 : 1 }' || status=1
+	chk "ga clear direct amplitude" "$(ga_sum "$d/clear.txt" "$tc" 0.0008)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*sqrt(73.0))}')" 0.01
+	# 遮蔽で棄却した像の数が受音点 #1 でゼロでないこと (可視性判定が働いた証拠)
+	grep -qE "point #1: image sources up to order 3 -> [0-9]+ visible, [1-9][0-9]* blocked" \
+		"$d/solver.log" \
+		&& say_ok "ga blocked-image count" \
+		|| say_ng "ga blocked-image count" " (visibility test did not reject anything)"
+}
+
+echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
+# 乱数生成器を使わない (レイ方向は球面フィボナッチ格子、拡散反射の抽選は
+# 決定的な整数ハッシュ、後期残響の符号列は固定初期値の LFSR)。
+# ソルバー自体は OpenMP を使わないので、スレッド数にも依存しない。
+d="$WORK/ga_lossless"
+cp "$d/rir.wav" "$d/rir_run1.wav"
+if "$GA_SOLVER" "$d" > /dev/null 2>&1 && cmp -s "$d/rir_run1.wav" "$d/rir.wav"; then
+	printf "%-26s -> OK (2 回実行がビット一致)\n" "ga rerun determinism"
+else
+	say_ng "ga rerun determinism"
+fi
+OMP_NUM_THREADS=1 "$GA_SOLVER" "$d" > /dev/null 2>&1
+cp "$d/rir.wav" "$d/rir_n1.wav"
+OMP_NUM_THREADS=4 "$GA_SOLVER" "$d" > /dev/null 2>&1
+if cmp -s "$d/rir_n1.wav" "$d/rir.wav"; then
+	printf "%-26s -> OK (1 と 4 スレッドがビット一致)\n" "ga thread invariance"
+else
+	say_ng "ga thread invariance"
+fi
+
+echo "--- (G) ga error paths (honest non-zero exit, no fabricated output)"
+rm -rf "$WORK/ga_empty"; mkdir -p "$WORK/ga_empty"
+if "$GA_SOLVER" "$WORK/ga_empty" > /dev/null 2> "$WORK/ga_empty/stderr.log"; then
+	say_ng "ga no-input exit" " (should fail)"
+elif [ -s "$WORK/ga_empty/stderr.log" ] && [ ! -f "$WORK/ga_empty/rir.wav" ]; then
+	printf "%-26s -> OK (non-zero, stderr reason, no rir.wav)\n" "ga no-input exit"
+else
+	say_ng "ga no-input exit" " (missing stderr reason or fabricated rir)"
+fi
+# .ofdx の値域外 (image_order = 9) は黙って既定値に落とさず非零終了する
+rm -rf "$WORK/ga_badorder"; mkdir -p "$WORK/ga_badorder"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_badorder/"
+sed 's/"image_order": 2/"image_order": 9/' "$SRC/ga_floor.ofdx" \
+	> "$WORK/ga_badorder/ga_floor.ofdx"
+if "$GA_SOLVER" "$WORK/ga_badorder" > /dev/null 2> "$WORK/ga_badorder/stderr.log"; then
+	say_ng "ga bad image_order exit" " (should fail)"
+elif grep -qi "image_order" "$WORK/ga_badorder/stderr.log" && \
+     [ ! -f "$WORK/ga_badorder/rir.wav" ]; then
+	printf "%-26s -> OK (refused with the offending key)\n" "ga bad image_order exit"
+else
+	say_ng "ga bad image_order exit" " (no reason in stderr)"
+fi
+# 音源が室外 (数値を捏造せず失敗する)
+rm -rf "$WORK/ga_outside"; mkdir -p "$WORK/ga_outside"
+sed 's/^feed = z 3.0 5.0 5.0/feed = z 30.0 5.0 5.0/' "$SRC/ga_floor.ofd" \
+	> "$WORK/ga_outside/ga_floor.ofd"
+if "$GA_SOLVER" "$WORK/ga_outside" > /dev/null 2> "$WORK/ga_outside/stderr.log"; then
+	say_ng "ga source-outside exit" " (should fail)"
+elif grep -qi "outside the room" "$WORK/ga_outside/stderr.log"; then
+	printf "%-26s -> OK (refused with the reason)\n" "ga source-outside exit"
+else
+	say_ng "ga source-outside exit" " (no reason in stderr)"
+fi
+if "$GA_SOLVER" > /dev/null 2>&1; then
+	say_ng "ga usage exit" " (should fail)"
+else
+	say_ok "ga usage exit"
 fi
 
 if [ "$status" -ne 0 ]; then

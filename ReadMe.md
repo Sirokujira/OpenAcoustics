@@ -1,28 +1,44 @@
-# OpenAcoustics — ofdx_acoustic_fdtd
+# OpenAcoustics — ofdx_acoustic_fdtd / ofdx_acoustic_ga
 
-[OpenFDTD-X](../OpenFDTD-X) (Qt6 GUI) の室内音響用外部 FDTD ソルバー。
+[OpenFDTD-X](../OpenFDTD-X) (Qt6 GUI) の室内音響用外部ソルバー。
 GUI から QProcess で起動され、部屋のインパルス応答 (RIR) を計算して
-ファイル契約 (ADR-0007) で返す処理カーネル。
+ファイル契約 (ADR-0007) で返す処理カーネル。**低域と高域で 2 本**ある。
 
-- 3 次元線形音響のスタガード格子 FDTD (leapfrog):
+| バイナリ | 担当 | 手法 | 出力 fs |
+|---|---|---|---|
+| `ofdx_acoustic_fdtd` | 低域 | 3 次元線形音響の FDTD (波動) | CFL から決まる整数 (dx 依存) |
+| `ofdx_acoustic_ga` | 高域 | 幾何音響 (鏡像法 + 光線追跡) | **48000 Hz 固定** |
+
+FDTD の使用可能上限は格子分解能で決まる **fmax = c/(10·dx)** で、
+7,200 m³ のホールで歌声の可聴化に必要な 4 kHz を得ようとすると
+dx = 8.6 mm → 114 億セルとなり原理的に不可能 (dx = 0.5 m の実測で
+fmax = 68.6 Hz)。そこで**低域 = FDTD、高域 = 幾何音響**のハイブリッドにし、
+帯域分割と合成は GUI (OpenFDTD-X) 側が行う。両ソルバーは同じ `.ofd`/`.ofdx`
+を読み、同じ ADR-0007 契約で結果を返すので、GUI からは同じ手順で起動できる。
+
+- `ofdx_acoustic_fdtd`: 3 次元線形音響のスタガード格子 FDTD (leapfrog):
   p (セル中心) / vx, vy, vz (面)。
   p<sup>n+1</sup> = p<sup>n</sup> − ρc²Δt ∇·v、
   v<sup>n+1/2</sup> = v<sup>n−1/2</sup> − (Δt/ρ)∇p。
-  c = 343.0 m/s、ρ = 1.204 kg/m³ (20 ℃ 空気)。
-- 入力は OpenFDTD 互換 `.ofd` + `.ofdx` (JSON サイドカー、吸音率)。
+- `ofdx_acoustic_ga`: 鏡像法 (早期反射) + 光線追跡 (後期残響) の幾何音響。
+  格子は持たず、音源・受音点は連続座標のまま扱う。
+- 共通: c = 343.0 m/s、ρ = 1.204 kg/m³ (20 ℃ 空気)。
+  入力は OpenFDTD 互換 `.ofd` + `.ofdx` (JSON サイドカー、吸音率)。
 - 外部ライブラリに依存しない (C11 + CMake、OpenMP のみ任意)。
-  WAV / JSON は自前実装。[OpenPEEC](../OpenPEEC) と同じビルド規約・
+  WAV / JSON / FFT は自前実装。[OpenPEEC](../OpenPEEC) と同じビルド規約・
   移植性規則を共有する姉妹プロジェクト。
-- 決定性: 乱数不使用。OpenMP 並列はリダクションを持たず、
+- 決定性: **乱数生成器を使わない**。FDTD の OpenMP 並列はリダクションを
+  持たず、幾何音響はそもそも OpenMP を使わないので、どちらも再実行・
   スレッド数によらず結果は**ビット単位で一致**する。
 
 ## ビルド
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
+cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 (解析解との比較 — 40 判定)
+# 検証 (解析解との比較 — 81 判定 : FDTD 40 + 幾何音響 41)
+# 第 3 引数を省略すると実行ファイル名の fdtd -> ga 置換で高域側を見つける
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 ```
 
@@ -33,8 +49,11 @@ Windows は MSVC + Ninja でビルドできる (CI と同じ)。
 ## 使い方
 
 ```
-ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]
+ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]   # 低域 (FDTD)
+ofdx_acoustic_ga   <working_dir> [<input_file.ofd>]   # 高域 (幾何音響)
 ```
+
+以下この節は両ソルバー共通 (幾何音響固有の仕様は後述の専用節)。
 
 - `input_file` を省略すると `working_dir` 直下の**唯一の** `.ofd` を探す
   (無い / 複数あるときは非零終了 + stderr に理由)。
@@ -42,8 +61,9 @@ ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]
 - `mpiexec` 経由の起動も許容 (MPI 非対応 — 単プロセスとして動く)。
 - 進捗は stdout に `progress a/b` 行 (正規表現 `^progress\s+(\d+)\s*/\s*(\d+)$`)。
   **分母は常に 50** (2% 刻み) で、時間ステップ数によらない — 行数を一定に保つ
-  ため。実際のステップ数・セル数・fs は実行開始時に stdout へ 1 行出す
-  (`solve: N steps, M cells, fs = ... Hz, ...`) ので GUI のログ枠で確認できる。
+  ため。実際の規模 (FDTD はステップ数・セル数・fs、幾何音響はレイ本数・
+  鏡像次数・標本数) は実行開始時に stdout へ 1 行出す (`solve: ...`) ので
+  GUI のログ枠で確認できる。
 - 異常時 (入力なし・格子過大など) は**非零終了コード + stderr へ明確な理由**。
   合成 RIR を捏造して正常終了することはない。
 
@@ -53,7 +73,7 @@ ofdx_acoustic_fdtd <working_dir> [<input_file.ofd>]
 |---|---|---|
 | `rir.wav` | ○ | 受音点 #1 の RIR (float32 モノラル WAV、fs = サンプリング周波数) |
 | `rir_<名前>.wav` | — | 受音点ごとの RIR。名前は **`.ofd` point 行末の `# 名前` → `.ofdx` の `acoustic.receivers[]` (座標一致で引き当て)** の順に決まり、どちらも無ければ `rir_2.wav` 等の連番。受音点 #1 は契約どおり `rir.wav` を出すが、名前があるときは別名 `rir_<名前>.wav` も併せて出す (GUI の自動割当は名前照合のため) |
-| `metadata.json` | ○ | `contract_version: 1`、ソルバー名/バージョン、格子 (Δx・セル数)、fs、音源/受音点座標、音速、実行条件 |
+| `metadata.json` | ○ | `contract_version: 1`、ソルバー名/バージョン、格子 (Δx・セル数 — 幾何音響は格子を持たないので 0 + `gridless: true`)、fs、音源/受音点座標、音速、実行条件。幾何音響はさらに `valid_band_hz` ほかを追加する |
 | `metrics.json` | — | T_Sabine 等の参考値 (GUI は自前計算を正とし突合表示のみ) |
 | `solver.log` | ○ | 実行ログ (`normal end` で正常終了) |
 
@@ -68,6 +88,8 @@ GUI 側の `AcousticRunner` は次の順でソルバーバイナリを解決す�
 
 ```bash
 export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
+# 高域側は同じ CLI・同じ契約なので、同じ仕組みで差し替えられる
+export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_ga
 ```
 
 または OpenFDTD-X のカーネルパス設定ダイアログで直接指定する。
@@ -81,9 +103,9 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
 | キーワード | 対応 | 備考 |
 |---|---|---|
 | `title` | ○ | metadata / ログに記録 |
-| `xmesh` / `ymesh` / `zmesh` | ○ | 計算領域と刻み。**単一の一様格子 dx = 最小刻み**に丸める (非一様は warning) |
-| `geometry` | ○ | 剛体 (法線速度 0) としてボクセル化。shape 1 (直方体) は厳密、**その他の shape は AABB 近似** (warning) |
-| `feed` | ○ | 音源位置。**#1 のみ使用** (複数あれば warning)。励振波形はガウシアン微分のソフト音源 (下記) |
+| `xmesh` / `ymesh` / `zmesh` | ○ | 計算領域と刻み。FDTD は**単一の一様格子 dx = 最小刻み**に丸める (非一様は warning)。幾何音響は範囲だけを読み、**直方体の室**として使う (刻みは使わない) |
+| `geometry` | ○ | 剛体。FDTD はボクセル化、幾何音響は遮蔽 + レイの反射面。shape 1 (直方体) は厳密、**その他の shape は AABB 近似** (warning) |
+| `feed` | ○ | 音源位置。**#1 のみ使用** (複数あれば warning)。励振波形は FDTD がガウシアン微分のソフト音源 (下記)、幾何音響は理想インパルス (無指向性) |
 | `point` | ○ | 受音点 (全て)。行末 `# 名前` が WAV ファイル名になる |
 | `frequency1` / `frequency2` | 記録のみ | 音響ソルバーでは物理に使用しない |
 | `material` / `abc` / `pml` / `rfeed` ほか | 無視 | 電磁界用 (前方互換で読み飛ばす) |
@@ -91,7 +113,8 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
 ### .ofdx (JSON サイドカー)
 
 `acoustic.absorption[]` の `enabled` 行から壁の吸音率 α を読む。
-6 バンド `alpha` 配列は**帯域平均**を使う (v1)。role の対応:
+6 バンド `alpha` 配列は FDTD が**帯域平均**を使い (v1)、幾何音響は
+**バンド別にそのまま**使う (8 kHz バンドは 4 kHz から外挿)。role の対応:
 
 | role | 壁 |
 |---|---|
@@ -101,10 +124,15 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
 | 3 (RearWall) | x± |
 | その他 / 欠落 | 既定 α = 0.1 |
 
-外壁は局所反応インピーダンス Z = ρc(1+√(1−α))/(1−√(1−α)) の半陰的更新。
-α → 1 で Z → ρc (無反射)、α → 0 で剛壁に厳密に一致する。
+FDTD の外壁は局所反応インピーダンス Z = ρc(1+√(1−α))/(1−√(1−α)) の
+半陰的更新。α → 1 で Z → ρc (無反射)、α → 0 で剛壁に厳密に一致する。
+幾何音響は圧力反射係数 R = √(1−α) をバンド別に掛ける。
 
-## 数値仕様 (v1)
+幾何音響ソルバー固有の設定は `acoustic.ga` に置く (後述)。
+FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
+両ソルバーで共有できる。
+
+## ofdx_acoustic_fdtd の数値仕様 (v1)
 
 - dx = `.ofd` メッシュの最小刻み。Δt = 1/fs、
   **fs = ceil(c·√3/(0.99·dx))** (CFL を満たす最小の整数 Hz — WAV の
@@ -115,10 +143,127 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
   T_Sabine = 0.161·V/A、A は吸音表 × 壁面積から (表が無ければ α=0.1 の 6 面)。
 - セル総数 > 3000 万は非零終了 (メッシュを粗くする案内を stderr に出す)。
 
+## ofdx_acoustic_ga — 幾何音響ソルバー (高域担当)
+
+FDTD の周波数上限 (fmax = c/(10·dx)) より上を受け持つ別バイナリ。
+**帯域分割・FDTD との合成は行わない** (GUI 側の担当)。ここは「高域の RIR を
+規約どおりに 1 本出す」ことだけに責任を持つ。
+
+### 手法
+
+| 段 | 内容 |
+|---|---|
+| 早期反射 | **鏡像法**。室は `.ofd` のメッシュ範囲がそのまま直方体になるので像は閉形式。次数は既定 2 (`.ofdx` で 1〜3)。**可視性判定あり**: 展開空間の直線をセル境界で分割して室内へ折り返し、復元した実経路を剛体障害物の AABB と交差判定して遮蔽された像を棄却する |
+| 後期残響 | **光線追跡**。方向は球面フィボナッチ格子 (決定的準一様)。レイはオクターブ 7 バンド (125 Hz〜8 kHz) のエネルギーを運び、受音球の通過本数からバンド別エコーグラム (1 ms ビン) を作る |
+| 反射列 → 波形 | エコーグラムをバンド別の等エネルギー雑音に変換し、早期反射 (理想インパルス) と足してバンド重み付き合成する |
+| バンド合成 | 零位相の単位分割フィルタバンクを自前 FFT で適用 (下記) |
+| 吸音 | `.ofdx` の 6 バンド α を**バンド別**に使う (FDTD 側は帯域平均に潰している)。8 kHz バンドは 4 kHz の値を外挿 |
+| 空気吸収 | **ISO 9613-1**。既定 20 ℃ / 50 %RH / 101.325 kPa (`.ofdx` で指定可) |
+| 拡散反射 | Lambert 余弦則。散乱係数 s の既定は 0.1。鏡像は (1−s)<sup>n/2</sup> だけ減じ、抜けた分は「1 回でも拡散したレイ」が受け持つので二重計上しない |
+
+### 規約 (FDTD 側と合成するための共通規約 — 厳守)
+
+- **振幅**: 自由音場の直接音が **1/(4πr)**。離散 RIR での「振幅」は
+  畳み込みで再現される量、すなわち**その到達の標本和 (単位標本利得)**。
+  反射は 3 次ラグランジュ分数遅延 (4 タップ) で置くので、標本和 = 振幅、
+  標本の 1 次モーメント = 到達時刻が**厳密**に成り立つ。
+- **時間原点**: **t = 0 が音源発火時刻**。直接音は t = r/c に立つ
+  (FDTD 側の t0 のような遅延は入れない)。metadata の `t0_s` は常に 0。
+- **出力 fs**: **48000 Hz 固定** (`sample_rate` に明記)。
+- **有効帯域**: metadata の `valid_band_hz: [f_lo, f_hi]`。
+  - f_lo = **Schroeder 周波数** 2000·√(T60/V) [Hz]。これより下はモード密度が
+    足りず、干渉を無視して強度を加算する幾何音響の前提が崩れる
+    (20×15×10 m のホールで約 61 Hz)。
+  - f_hi = min(fs/2, 8 kHz バンド上端 8000·√2) = **11313.7 Hz**。吸音率も
+    空気吸収も 8 kHz バンドまでしか定義がないため、それより上は外挿になる。
+
+### バンド合成フィルタバンク
+
+オクターブ中心 f<sub>c,b</sub> = 125·2<sup>b</sup> を節点とする
+「対数周波数上の raised-cosine ハット」:
+
+W<sub>b</sub>(f) = (1 + cos(π|log₂(f/f<sub>c,b</sub>)|)) / 2 (|log₂| ≤ 1)、
+W<sub>0</sub> = 1 (f ≤ 125 Hz)、W<sub>6</sub> = 1 (f ≥ 8 kHz)
+
+- **Σ<sub>b</sub> W<sub>b</sub>(f) = 1** (単位分割) — 全バンド同利得なら理想
+  インパルスがそのまま残る。無損失ケース (α = 0) の厳密なエネルギー保存は
+  この性質による。
+- **W<sub>b</sub>(f<sub>c,b′</sub>) = δ<sub>bb′</sub>** — バンド中心では他バンドが
+  漏れないので、metadata の値と DFT の読みが 1 対 1 で対応する。
+- 実数の重み = **零位相**なので群遅延が 0 で、到達時刻の規約を壊さない。
+  自前の radix-2 FFT で `Y(f) = Σ_b W_b(f)·X_b(f)` を作って逆変換する
+  (零詰め長は nsamples + 4096 以上の 2 冪なので巡回畳み込みの回り込みは
+  出力範囲に入らない)。
+
+### `.ofdx` の `acoustic.ga` (すべて省略可 — 省略時は既定値)
+
+| キー | 既定 | 範囲 | 意味 |
+|---|---|---|---|
+| `image_order` | 2 | 1〜3 | 鏡像法の次数 |
+| `rays` | 30000 | 100〜2,000,000 | 光線追跡の本数 |
+| `scattering` | 0.1 | 0〜1 | 拡散反射の割合 (0 = 鏡面のみ) |
+| `temperature_c` | 20 | −20〜50 | 空気吸収の温度 [℃] |
+| `humidity_percent` | 50 | 0〜100 | 空気吸収の相対湿度 [%] |
+| `pressure_kpa` | 101.325 | 50〜120 | 空気吸収の気圧 [kPa] |
+| `air_absorption` | true | — | 空気吸収の有無 |
+| `receiver_radius_m` | 自動 | 0〜10 | 受音検出球の半径 (自動は V<sup>1/3</sup>/10 を 0.3〜1.5 m に制限し、壁・障害物・音源に食い込まないよう切り詰める) |
+| `duration_s` | 自動 | 0〜10 | 計算時間 (自動は clamp(1.5·max<sub>b</sub> T<sub>Eyring</sub>, 0.5, 3.0) s、最遠受音点の直接音が必ず入るよう下限も確保) |
+
+値域外の値は**黙って既定値に落とさず非零終了**する (静かに狂わせない)。
+未知キーは無視 (前方互換)。温度・湿度は**空気吸収にのみ**使い、音速は
+FDTD 側と揃えるため c = 343.0 m/s 固定。
+
+### metadata.json の追加キー
+
+契約キーは削除・改名せず (格子を持たないので `grid` は `dx_m: 0`,
+`cells: [0,0,0]` + `gridless: true`)、以下を追加する:
+`valid_band_hz` / `bands_hz` / `boundary_alpha_bands` / `image_order` /
+`rays` / `scattering` / `air` (温湿度・気圧・バンド別 dB/m) /
+`t_eyring_s` / `t_sabine_bands_s` / `room` / `method` /
+`amplitude_convention` / `time_origin`、受音点ごとに
+`sphere_radius_m` / `image_sources` / `image_sources_blocked` / `ray_detections`。
+
+### 幾何音響の制約 (正直な現状)
+
+- **有効帯域の下限は Schroeder 周波数**。それより下は FDTD 側の担当で、
+  幾何音響の値を使ってはいけない (モードも干渉も表現していない)。
+- **上限 11313.7 Hz より上は 8 kHz バンドの外挿**。吸音率が 6 バンド
+  (125 Hz〜4 kHz) しか無いので、8 kHz バンド自体も 4 kHz からの外挿。
+- **室は直方体のみ**。`.ofd` のメッシュ範囲がそのまま室になる。
+  非直方体の室形状は表現できない。
+- **`geometry` は剛体 (α = 0) の障害物**として、①鏡像法の**遮蔽**と
+  ②光線追跡の反射にだけ使う。**障害物自身の低次 (鏡像法が担当する次数の)
+  鏡面反射は入らない** — 障害物由来の反射はレイ側 (後期) にのみ現れる。
+  shape 1 (直方体) は厳密、その他の shape は **AABB 近似** (warning)。
+- **壁の吸音は入射角によらない** (垂直入射のエネルギー反射率 1 − α)。
+  回折・干渉・位相は扱わない (幾何音響の原理的な制約)。
+- **単一音源・無指向性**。`feed` が複数あっても #1 のみ (warning)。
+- **散乱係数は室全体で 1 値** (面ごと・バンドごとの散乱係数は未対応)。
+- **残響時間は Eyring 式と一致しない**。Eyring は「吸音が一様に分布した
+  拡散場」の近似式で、幾何音響はその仮定を置かない。
+  - 吸音が**一様**な直方体 (検証 `ga_t60`) では初期減衰率が Eyring と一致し
+    (実測 −2%)、後半だけ場が混合しない分だけ緩くなる (−25 dB まで含めると
+    +6% 程度)。検証 (C) はこの物理を踏まえ初期減衰率 (−5〜−15 dB) で比較する。
+  - 吸音が**偏っている**室 (客席床だけ吸音が大きいホール等) では、吸音面を
+    避けて飛ぶレイが残るため Eyring より長く出る。`hall.ofd` の 1 kHz で
+    T60 は Eyring 1.57 s に対し散乱係数 s = 0 で 2.15 s (+37%)、
+    s = 0.1 (既定) で 1.92 s (+23%)、s = 1.0 で 1.77 s (+13%)。
+    実際の室の残響を合わせ込むときは `scattering` が主要な調整点になる
+    (客席・拡散体のある面は 0.3〜0.7 が実務的な目安)。**面ごと・バンドごとの
+    散乱係数は未対応**なので、室全体で 1 値しか与えられない。
+- **OpenMP は使わない**。レイのエコーグラム加算がリダクションになり、
+  スレッド数によるビット一致を壊すため。幾何音響は FDTD より 3 桁速い
+  (20×15×10 m のホール・3 秒・30000 本で約 2.7 秒) のでシリアルで足りる。
+- **決定性の範囲**: 同一バイナリでの再実行・スレッド数はビット一致。
+  異なる OS / libm 間では三角関数などの丸めが違うためビット一致しない
+  (統計量は一致する)。
+
 ## 検証ケース (data/sample/ — 期待値はすべて実装から独立な解析解)
 
-`acoustic_check.sh` が CI (3 OS + sanitize) で全判定を実行する。
-各 `.ofd` の先頭コメントに期待値の導出が書いてある。
+`acoustic_check.sh` が CI (3 OS + sanitize) で全 81 判定 (FDTD 40 +
+幾何音響 41) を実行する。各 `.ofd` の先頭コメントに期待値の導出が書いてある。
+
+### ofdx_acoustic_fdtd
 
 | ケース | 検証内容 | 解析解 | 許容 |
 |---|---|---|---|
@@ -131,7 +276,23 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
 | `box_modes` ほか | 契約 (WAV ヘッダ・metadata・progress 書式・異常系の非零終了) | ADR-0007 | 完全一致 |
 | `hall` | E2E: ホール規模 20×15×10 m (dx = 0.25 m、192,000 セル) | 直接音 t0 + r/c、Sabine 減衰 | スモーク |
 
-## v1 の制約 (正直な現状)
+### ofdx_acoustic_ga
+
+| ケース | 検証内容 | 解析解 / 出所 | 許容 |
+|---|---|---|---|
+| `ga_freefield` | (A) 自由音場の直接音の時刻と振幅 (r = 10 m) | t = r/c、A = 1/(4πr) | ±1% |
+| `ga_freefield` | (D) 4 kHz の空気吸収 (100 m の超過減衰) | **ISO 9613-2:1996 Table 2** の 10 ℃/70 %RH 行 32.8 dB/km | ±0.5 dB |
+| `ga_floor` | (B) 剛体床 1 枚: 直接音 + 1 次反射の 2 発 | 鏡像法の閉形式 (r₀ = √32、r₁ = √52 m) | ±1% |
+| `ga_t60` | (C) 10 m 立方体のバンド別 T60 (500 Hz / 4 kHz) | Eyring 式 + 空気吸収 4mV | ±5% |
+| `ga_lossless` | (E) 全 α = 0 + 空気吸収 off でエコーグラムが減衰しない | 無損失 | 窓間 ≤ 0.5 dB |
+| `ga_lossless` | (F) 決定性 (再実行 / スレッド数 1 vs 4) | — | **ビット一致** |
+| `ga_pillar` | (G) 遮蔽 (衝立で直接音が消え、隣の受音点は 1/(4πr))、AABB 近似・複数 feed の warning | 鏡像法の可視性判定 | ±1% / 存在判定 |
+| `ga_freefield` ほか | (G) 契約 (WAV ヘッダ 48 kHz・metadata・progress 書式・異常系の非零終了) | ADR-0007 | 完全一致 |
+| `hall` | E2E: ホール規模 20×15×10 m (30000 本、3 秒) を両ソルバーで実行 | — | スモーク |
+
+## v1 の制約 (正直な現状 — ofdx_acoustic_fdtd)
+
+幾何音響ソルバーの制約は上記「幾何音響の制約」を参照。
 
 - **周波数上限 fmax = c/(10·dx)**: dx = 0.1 m で 343 Hz、dx = 0.25 m で
   137 Hz。可聴帯域全体の RIR ではない (低域のモード・初期反射の検討用)。
@@ -140,7 +301,8 @@ export OFDX_ACOUSTIC_SOLVER=/path/to/OpenAcoustics/bin/ofdx_acoustic_fdtd
 - **単一音源**: `feed` が複数あっても #1 のみ (warning を出す)。
 - **shape 1 (直方体) 以外の geometry は AABB 近似** (warning を出す)。
 - **壁は局所反応**: 斜入射の角度依存吸音は Z 一定の範囲でのみ表現される。
-- **空気吸収なし** (`air_a` は読み飛ばす)。長距離・高域では過大評価になる。
+- **空気吸収なし** (`air_a` は読み飛ばす)。長距離・高域では過大評価になる
+  (幾何音響側は ISO 9613-1 で扱う)。
 - **MPI 非対応**: `mpiexec` 起動は許容するが単プロセスで動く。
 
 ## ライセンス / 関連リポジトリ
