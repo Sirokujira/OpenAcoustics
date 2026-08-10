@@ -49,6 +49,7 @@ jobs:
           grep "normal end" /tmp/ga-hall/solver.log
           grep -q '"sample_rate": 48000' /tmp/ga-hall/metadata.json
           grep -q '"valid_band_hz"' /tmp/ga-hall/metadata.json
+          grep -q '"reflecting_surfaces"' /tmp/ga-hall/metadata.json
           test -s /tmp/ga-hall/rir.wav && test -s /tmp/ga-hall/rir_balcony.wav
 
       - name: Upload binaries (artifact)

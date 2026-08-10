@@ -66,6 +66,9 @@
 /* 外壁インデックス (alpha[][] の並び — FDTD 側 AC_XM.. と同じ順序) */
 enum { GA_XM = 0, GA_XP, GA_YM, GA_YP, GA_ZM, GA_ZP, GA_NWALL };
 
+/* 鏡像法の探索コスト上限 (障害物が多いと面数^次数 で増えるため) */
+#define GA_IMAGE_NODE_MAX 4000000
+
 /* ── 入力要素 ──────────────────────────────────────────────────── */
 
 /* 室内の剛体障害物。可視性判定 (遮蔽) と光線追跡の反射に使う。
@@ -76,7 +79,25 @@ typedef struct {
 	double lo[3], hi[3];
 	int    ok;          /* 0 = 未知 shape (無視した) */
 	int    exact;       /* 1 = shape 1 (厳密)、0 = AABB 近似 */
+	int    surf0;       /* この障害物の 6 面の先頭 surf[] 添字 (無効なら -1) */
 } ga_geom_t;
+
+/* 反射面 : 軸平行の有限矩形。室の 6 面と、障害物 (AABB) 1 個あたり 6 面。
+ * 鏡像法 (一般化された面集合による鏡像) と光線追跡が共通で使う。
+ * 面が軸平行に限られるので、鏡映は 1 座標の反転、面内判定は残り 2 座標の
+ * 範囲判定、入射角は cos(theta) = |d[axis]| で済む。 */
+typedef struct {
+	int    axis;             /* 法線の軸 : 0=x, 1=y, 2=z */
+	double coord;            /* 平面の位置 */
+	double nrm;              /* 音場側 (反射する側) を向く法線の符号 +1/-1 */
+	double lo[2], hi[2];     /* 面内の矩形 (u = (axis+1)%3, v = (axis+2)%3) */
+	double alpha[GA_NBAND];
+	double refl[GA_NBAND];   /* 垂直入射の圧力反射係数 sqrt(1-alpha) */
+	double zeta[GA_NBAND];   /* 規格化インピーダンス (角度依存吸音のとき使う) */
+	double scatter;          /* 散乱係数 (面ごと) */
+	int    wall;             /* 室壁なら GA_XM.. / 障害物面なら -1 */
+	int    geom;             /* 障害物番号 (0 起点) / 室壁なら -1 */
+} ga_surf_t;
 
 typedef struct {
 	char   name[GA_NAME_MAX];        /* .ofd point 行末の "# 名前" (空可) */
@@ -115,12 +136,18 @@ typedef struct {
 	int    have_band_alpha;              /* 吸音表を読めたか */
 	double alpha[GA_NWALL][GA_NBAND];    /* バンド別吸音率 */
 	double refl[GA_NWALL][GA_NBAND];     /* 圧力反射係数 R = sqrt(1-alpha) */
+	double wall_scatter[GA_NWALL];       /* 面ごとの散乱係数 (< 0 = 既定を使う) */
+
+	/* 反射面リスト (室 6 面 + 障害物 6 面/個) */
+	ga_surf_t *surf;
+	int        nsurf;
 
 	/* 幾何音響パラメータ */
 	int    order;                        /* 鏡像法の次数 (1..3) */
 	int    nrays;
-	double scatter;                      /* 拡散反射の割合 (0..1) */
-	long   qidx;                         /* 準乱数列 (Halton) の位置 — 決定的 */
+	double scatter;                      /* 拡散反射の割合 (0..1、既定値) */
+	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
+	long   qidx;                         /* 決定的ハッシュ列の位置 */
 	double temp_c, humid, press_kpa;
 	int    air_on;
 	double duration_user;                /* > 0 なら計算時間を強制 */
@@ -138,7 +165,7 @@ typedef struct {
 	double t60max;                       /* Eyring のバンド最大 (無損失は -1) */
 	double tsabmax;                      /* Sabine のバンド最大 (無損失は -1) */
 	double flo, fhi;                     /* 有効帯域 [Hz] */
-	double vol, surf;                    /* 室容積 / 表面積 */
+	double vol, area;                    /* 室容積 / 表面積 */
 
 	/* エコーグラム (nrecv * nbins * GA_NBAND) */
 	int     nbins;
@@ -185,6 +212,16 @@ int ga_read_ofdx(ga_t *g);
 int    ga_setup(ga_t *g);
 double ga_air_alpha_db_m(double f_hz, double temp_c, double humid_pct,
                          double press_kpa);   /* ISO 9613-1 [dB/m] */
+
+/* 局所反応境界 (実数の規格化インピーダンス zeta) の統計 (ランダム) 入射吸音率。
+ * Paris の式 alpha_stat = 2 int_0^{pi/2} alpha(theta) cos sin dtheta を
+ * R(theta) = (zeta cos - 1)/(zeta cos + 1) について積分した閉形式 :
+ *   alpha_stat(zeta) = (8/zeta^2) [ zeta + 1 - 2 ln(1+zeta) - 1/(1+zeta) ]
+ * 角度依存吸音では、吸音表の値 (= ランダム入射) からこの式を逆に解いて
+ * zeta を決める。逆に解かずに表の値を垂直入射として使うと二重に効いてしまう。 */
+double ga_alpha_stat(double zeta);
+double ga_zeta_from_alpha(double alpha_stat);   /* 逆問題 (zeta >= peak の枝) */
+#define GA_ALPHA_STAT_MAX 0.9514   /* 局所反応・実インピーダンスの上限 (概数) */
 
 /* ga_trace.c : 鏡像法 (早期反射) と光線追跡 (後期残響)
  *   ga_images : 受音点 r の可視な鏡像音源を band[] へ置く

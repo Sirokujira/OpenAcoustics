@@ -3,9 +3,13 @@
  * ここで決まる物理量 :
  *   - 室 : .ofd のメッシュ範囲がそのまま直方体の室。格子は作らない
  *          (幾何音響は連続座標で計算する — 受音点も音源も丸めない)。
- *   - 境界 : バンド別の圧力反射係数 R_b = sqrt(1 - alpha_b)。
- *          幾何音響の標準的な「エネルギー反射率 = 1 - alpha」の定義そのもの
- *          (垂直入射・局所反応。斜入射の角度依存は v1 では扱わない)。
+ *   - 境界 : バンド別の圧力反射係数 R_b = sqrt(1 - alpha_b)。幾何音響の
+ *          標準的な「エネルギー反射率 = 1 - alpha」の定義そのもの。
+ *          .ofdx で角度依存吸音を on にすると、局所反応境界として
+ *          R(theta) = (zeta cos - 1)/(zeta cos + 1) を使う。zeta は
+ *          吸音表の**ランダム入射** alpha から Paris の式を逆に解いて決める。
+ *   - 反射面 : 室の 6 面と障害物 (AABB) の各 6 面をまとめた surf[]。
+ *          鏡像法も光線追跡もこのリストだけを見る。
  *   - 空気吸収 : ISO 9613-1 の減衰係数 [dB/m] をバンド中心周波数で評価する。
  *   - 計算時間 : T = clamp(1.5 * max_b T_Eyring(b), 0.5, 3.0) [s]。
  *          T_Eyring = 0.161 V / (-S ln(1 - alpha_mean) + 4 m V)
@@ -57,6 +61,47 @@ double ga_air_alpha_db_m(double f_hz, double temp_c, double humid_pct,
 	        + pow(Tr, -2.5)
 	          * (0.01275 * exp(-2239.1 / T) / (frO + f2 / frO)
 	             + 0.1068 * exp(-3352.0 / T) / (frN + f2 / frN)));
+}
+
+/* ── 局所反応境界の統計入射吸音率と、その逆問題 ──────────────────
+ * 実数の規格化インピーダンス zeta の面に平面波が角度 theta で入るとき
+ *   R(theta) = (zeta cos(theta) - 1) / (zeta cos(theta) + 1)
+ *   alpha(theta) = 1 - R^2 = 4 zeta cos / (zeta cos + 1)^2
+ * Paris の式 (ランダム入射 = cos 重み平均) に入れて x = cos(theta) で積分すると
+ *   alpha_stat = 8 zeta int_0^1 x^2/(zeta x + 1)^2 dx
+ *              = (8/zeta^2) [ zeta + 1 - 2 ln(1+zeta) - 1/(1+zeta) ]
+ * という閉形式になる。zeta -> 0 と zeta -> infinity で 0、zeta = 1.55 付近で
+ * 最大 0.951 を取る山型なので、逆問題は「山より右 (zeta が大きい = 空気より
+ * 硬い、通常の吸音材)」の枝で二分法を使う。最大値を超える吸音率は局所反応の
+ * 実インピーダンスでは表現できないので、呼び出し側で警告してクランプする。 */
+double ga_alpha_stat(double zeta)
+{
+	if (zeta <= 0.0) return 0.0;
+	return (8.0 / (zeta * zeta))
+	     * (zeta + 1.0 - 2.0 * log(1.0 + zeta) - 1.0 / (1.0 + zeta));
+}
+
+double ga_zeta_from_alpha(double alpha_stat)
+{
+	double lo = 1.0, hi = 1.0e9, peak;
+	int i;
+	/* 山の位置を三分探索で求める (決定的) */
+	{
+		double a = 0.1, b = 10.0;
+		for (i = 0; i < 200; i++) {
+			double m1 = a + (b - a) / 3.0, m2 = b - (b - a) / 3.0;
+			if (ga_alpha_stat(m1) < ga_alpha_stat(m2)) a = m1; else b = m2;
+		}
+		peak = 0.5 * (a + b);
+	}
+	if (alpha_stat >= ga_alpha_stat(peak)) return peak;
+	if (alpha_stat <= 0.0) return hi;
+	lo = peak;
+	for (i = 0; i < 200; i++) {          /* alpha_stat は [peak, inf) で単調減少 */
+		double mid = 0.5 * (lo + hi);
+		if (ga_alpha_stat(mid) > alpha_stat) lo = mid; else hi = mid;
+	}
+	return 0.5 * (lo + hi);
 }
 
 /* ── 幾何 : AABB (shape 1 は厳密に同じ箱)。戻り値 0 = 対応しない shape ──
@@ -198,7 +243,7 @@ int ga_setup(ga_t *g)
 	swall[GA_YM] = swall[GA_YP] = lx * lz;
 	swall[GA_ZM] = swall[GA_ZP] = lx * ly;
 	stot = 2.0 * (ly * lz + lx * lz + lx * ly);
-	g->surf = stot;
+	g->area = stot;
 
 	/* ── 剛体障害物 (AABB) ── */
 	for (n = 0; n < g->ngeom; n++) {
@@ -218,10 +263,10 @@ int ga_setup(ga_t *g)
 			       o->lo[2], o->hi[2]);
 	}
 	if (g->ngeom > 0)
-		ga_log(g, "obstacles: %d geometry entries treated as rigid (alpha = 0) — "
-		       "they occlude image-source paths and reflect rays, but their own "
-		       "1st/2nd order reflections are only in the ray (late) part",
-		       g->ngeom);
+		ga_log(g, "obstacles: %d geometry entries treated as rigid (alpha = 0). "
+		       "Their faces are part of the image-source surface set, so their "
+		       "own low-order specular reflections are included, and they also "
+		       "occlude other paths and reflect rays.", g->ngeom);
 
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
 	if (g->srcx < g->x0 || g->srcx > g->x1 || g->srcy < g->y0 || g->srcy > g->y1 ||
@@ -282,6 +327,105 @@ int ga_setup(ga_t *g)
 			g->alpha[w][b] = a;
 			g->refl[w][b] = sqrt(1.0 - a);
 		}
+
+	/* ── 反射面リスト : 室の 6 面 + 障害物 (AABB) 1 個あたり 6 面 ──
+	 * 鏡像法も光線追跡もこのリストだけを見る。障害物の面が入っているので、
+	 * 障害物による低次の鏡面反射も鏡像法が扱える (v1 では遮蔽のみだった)。
+	 * 障害物は剛体 (alpha = 0) — FDTD 側の geometry の扱いと揃えてある。 */
+	{
+		int nmax = GA_NWALL + 6 * g->ngeom;
+		double rlo[3], rhi[3];
+		int si = 0;
+		rlo[0] = g->x0; rlo[1] = g->y0; rlo[2] = g->z0;
+		rhi[0] = g->x1; rhi[1] = g->y1; rhi[2] = g->z1;
+		g->surf = (ga_surf_t *)calloc((size_t)nmax, sizeof(ga_surf_t));
+		if (!g->surf) {
+			ga_err(g, "out of memory (%d reflecting surfaces)", nmax);
+			return 1;
+		}
+		for (w = 0; w < GA_NWALL; w++) {
+			ga_surf_t *s = &g->surf[si++];
+			int ax = w / 2, hiside = w % 2;      /* GA_XM=0 -> axis 0, lo 側 */
+			int u = (ax + 1) % 3, v = (ax + 2) % 3;
+			s->axis  = ax;
+			s->coord = hiside ? rhi[ax] : rlo[ax];
+			s->nrm   = hiside ? -1.0 : 1.0;      /* 室内 (音場側) を向く法線 */
+			s->lo[0] = rlo[u]; s->hi[0] = rhi[u];
+			s->lo[1] = rlo[v]; s->hi[1] = rhi[v];
+			for (b = 0; b < GA_NBAND; b++) {
+				s->alpha[b] = g->alpha[w][b];
+				s->refl[b]  = g->refl[w][b];
+			}
+			s->scatter = (g->wall_scatter[w] >= 0.0)
+			           ? g->wall_scatter[w] : g->scatter;
+			s->wall = w;
+			s->geom = -1;
+		}
+		for (n = 0; n < g->ngeom; n++) {
+			ga_geom_t *o = &g->geom[n];
+			int ax;
+			o->surf0 = -1;
+			if (!o->ok) continue;
+			o->surf0 = si;      /* 面の並びは 2*axis + side (光線追跡が使う) */
+			for (ax = 0; ax < 3; ax++) {
+				int side, u = (ax + 1) % 3, v = (ax + 2) % 3;
+				for (side = 0; side < 2; side++) {
+					ga_surf_t *s = &g->surf[si++];
+					s->axis  = ax;
+					s->coord = side ? o->hi[ax] : o->lo[ax];
+					s->nrm   = side ? 1.0 : -1.0;   /* 障害物の外向き = 音場側 */
+					s->lo[0] = o->lo[u]; s->hi[0] = o->hi[u];
+					s->lo[1] = o->lo[v]; s->hi[1] = o->hi[v];
+					for (b = 0; b < GA_NBAND; b++) {
+						s->alpha[b] = 0.0;
+						s->refl[b]  = 1.0;
+					}
+					s->scatter = g->scatter;
+					s->wall = -1;
+					s->geom = n;
+				}
+			}
+		}
+		g->nsurf = si;
+	}
+
+	/* ── 角度依存吸音 (局所反応) 用の規格化インピーダンス ──
+	 * 吸音表の alpha は**ランダム入射**の値なので、Paris の式を逆に解いて
+	 * zeta を決める (垂直入射の値として使うと二重に効いてしまう)。
+	 * 局所反応の実インピーダンスで表せる上限は alpha_stat = 0.951 なので、
+	 * それを超える値は正直にクランプして警告する。 */
+	{
+		int clamped = 0;
+		double amax = ga_alpha_stat(ga_zeta_from_alpha(2.0));   /* 山の高さ */
+		for (n = 0; n < g->nsurf; n++) {
+			ga_surf_t *s = &g->surf[n];
+			for (b = 0; b < GA_NBAND; b++) {
+				double a = s->alpha[b];
+				if (a > amax) { a = amax; clamped = 1; }
+				s->zeta[b] = ga_zeta_from_alpha(a);
+			}
+		}
+		if (g->angle_dep) {
+			ga_log(g, "angle-dependent absorption: locally reacting boundary "
+			       "R(theta) = (zeta cos - 1)/(zeta cos + 1); zeta solved from "
+			       "the random-incidence alpha via Paris' formula "
+			       "(max representable alpha_stat = %.4f)", amax);
+			if (clamped)
+				ga_log(g, "warning: some alpha exceed %.4f, the largest "
+				       "random-incidence absorption a locally reacting real "
+				       "impedance can have — clamped (the surface is treated "
+				       "as the most absorbing such boundary, not as alpha = 1)",
+				       amax);
+			for (w = 0; w < GA_NWALL; w++)
+				ga_log(g, "wall %s: zeta = [%.4g %.4g %.4g %.4g %.4g %.4g %.4g]",
+				       (w == GA_XM) ? "x-" : (w == GA_XP) ? "x+" :
+				       (w == GA_YM) ? "y-" : (w == GA_YP) ? "y+" :
+				       (w == GA_ZM) ? "z-" : "z+",
+				       g->surf[w].zeta[0], g->surf[w].zeta[1], g->surf[w].zeta[2],
+				       g->surf[w].zeta[3], g->surf[w].zeta[4], g->surf[w].zeta[5],
+				       g->surf[w].zeta[6]);
+		}
+	}
 
 	/* ── 空気吸収 (ISO 9613-1) ── */
 	for (b = 0; b < GA_NBAND; b++) {
@@ -356,7 +500,7 @@ int ga_setup(ga_t *g)
 		if (g->t60max >= 0.0)
 			ga_log(g, "duration: max_band T_Eyring = %.4g s "
 			       "(V = %.4g m^3, S = %.4g m^2) -> T = %.4g s",
-			       g->t60max, g->vol, g->surf, tsolve);
+			       g->t60max, g->vol, g->area, tsolve);
 		else
 			ga_log(g, "duration: lossless room (alpha = 0, no air absorption) "
 			       "-> T = %.4g s (upper clamp)", tsolve);
@@ -443,9 +587,16 @@ int ga_setup(ga_t *g)
 		return 1;
 	}
 
-	ga_log(g, "scattering coefficient: %.4g (0 = specular only, 1 = fully "
-	       "diffuse Lambert). 鏡像法の像は (1-s)^(n/2) で減じ、拡散した分は "
-	       "レイ側が受け持つ (二重計上なし)", g->scatter);
+	ga_log(g, "scattering coefficient: default %.4g, per wall "
+	       "[x- %.4g, x+ %.4g, y- %.4g, y+ %.4g, z- %.4g, z+ %.4g] "
+	       "(0 = specular only, 1 = fully diffuse Lambert). 鏡像法の像は "
+	       "面ごとの (1-s)^(1/2) を掛けて減じ、抜けた拡散分はレイ側が受け持つ "
+	       "(二重計上なし)", g->scatter,
+	       g->surf[GA_XM].scatter, g->surf[GA_XP].scatter,
+	       g->surf[GA_YM].scatter, g->surf[GA_YP].scatter,
+	       g->surf[GA_ZM].scatter, g->surf[GA_ZP].scatter);
+	ga_log(g, "reflecting surfaces: %d (room 6 + %d obstacle faces)",
+	       g->nsurf, g->nsurf - GA_NWALL);
 	ga_log(g, "geometric acoustics: image order %d, %d rays, "
 	       "%d samples at %d Hz (%.4g s), echogram %d bins of %.4g ms",
 	       g->order, g->nrays, g->nsamples, GA_FS, g->duration,
