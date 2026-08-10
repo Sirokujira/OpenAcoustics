@@ -75,6 +75,7 @@ void ga_err(ga_t *g, const char *fmt, ...)
 void ga_free(ga_t *g)
 {
 	free(g->geom); g->geom = NULL;
+	free(g->surf); g->surf = NULL;
 	free(g->recv); g->recv = NULL;
 	free(g->echo); g->echo = NULL;
 	free(g->rir);  g->rir  = NULL;
@@ -136,9 +137,11 @@ int main(int argc, char **argv)
 	int i, w, b, nargs = 0;
 
 	memset(&ga, 0, sizeof(ga));
-	for (w = 0; w < GA_NWALL; w++)
+	for (w = 0; w < GA_NWALL; w++) {
 		for (b = 0; b < GA_NBAND; b++)
 			ga.alpha[w][b] = GA_ALPHA_DEFAULT;
+		ga.wall_scatter[w] = -1.0;    /* < 0 = acoustic.ga.scattering を使う */
+	}
 	ga.order    = GA_ORDER_DEFAULT;
 	ga.nrays    = GA_RAYS_DEFAULT;
 	ga.scatter  = GA_SCATTER_DEFAULT;

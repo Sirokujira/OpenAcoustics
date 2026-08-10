@@ -124,6 +124,7 @@ typedef struct {
 	int    role;
 	double a[GA_NBAND];
 	int    acount;      /* 読めた alpha の個数 */
+	double scatter;     /* 面ごとの散乱係数 (< 0 = acoustic.ga.scattering) */
 } arow_t;
 
 static int parse_alpha_array(js_t *j, arow_t *row)
@@ -149,6 +150,7 @@ static int parse_arow(js_t *j, arow_t *row)
 	row->enabled = 1;      /* 欠落キーは既定値 (旧ファイル互換) */
 	row->role = 0;
 	row->acount = 0;
+	row->scatter = -1.0;
 	for (b = 0; b < GA_NBAND; b++) row->a[b] = GA_ALPHA_DEFAULT;
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
@@ -165,6 +167,14 @@ static int parse_arow(js_t *j, arow_t *row)
 		}
 		else if (!strcmp(key, "alpha")) {
 			if (parse_alpha_array(j, row)) return 1;
+		}
+		else if (!strcmp(key, "scattering")) {
+			/* 面ごとの散乱係数 (幾何音響の拡張)。省略時は acoustic.ga.scattering。
+			 * バンド別ではなく 1 面 1 値 — 1 本のレイが全バンドを運ぶので
+			 * バンドごとに散乱判定を分けられないため (ReadMe の制約参照)。 */
+			if (jnumber(j, &v)) return 1;
+			if (v < 0.0 || v > 1.0) return 1;
+			row->scatter = v;
 		}
 		else {
 			if (jskip(j)) return 1;   /* name / area / air_a / 未知キー */
@@ -202,9 +212,14 @@ static int parse_absorption(ga_t *g, js_t *j)
 				else                              a[b] = row.a[row.acount - 1];
 			}
 			nw = role_walls(row.role, walls);
-			for (w = 0; w < nw; w++)
+			for (w = 0; w < nw; w++) {
 				for (b = 0; b < GA_NBAND; b++) g->alpha[walls[w]][b] = a[b];
+				g->wall_scatter[walls[w]] = row.scatter;
+			}
 			applied[row.role] = 1;
+			if (row.scatter >= 0.0)
+				ga_log(g, ".ofdx: absorption role %d -> scattering = %.4g "
+				       "(per-surface override)", row.role, row.scatter);
 			g->have_band_alpha = 1;
 			if (row.acount > 0 && row.acount < GA_NBAND)
 				ga_log(g, ".ofdx: absorption role %d has %d bands — band %d..%d "
@@ -357,6 +372,12 @@ static int parse_ga(ga_t *g, js_t *j)
 		else if (!strcmp(key, "air_absorption")) {
 			if (jbool(j, &bv)) return 1;
 			g->air_on = bv;
+		}
+		else if (!strcmp(key, "angle_dependent_absorption")) {
+			/* 局所反応境界の角度依存反射に切り替える。既定 false =
+			 * 従来どおり入射角によらず R = sqrt(1-alpha) (後方互換)。 */
+			if (jbool(j, &bv)) return 1;
+			g->angle_dep = bv;
 		}
 		else if (!strcmp(key, "receiver_radius_m")) {
 			if (jnumber(j, &v)) return 1;

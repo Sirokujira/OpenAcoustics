@@ -84,7 +84,7 @@ int ga_write_metadata(ga_t *g)
 	        g->x1 - g->x0, g->y1 - g->y0, g->z1 - g->z0);
 	fprintf(fp, "  },\n");
 	fprintf(fp, "  \"room\": { \"volume_m3\": %.10g, \"surface_m2\": %.10g },\n",
-	        g->vol, g->surf);
+	        g->vol, g->area);
 	fprintf(fp, "  \"sample_rate\": %d,\n", GA_FS);
 	fprintf(fp, "  \"duration_s\": %.10g,\n", g->duration);
 	fprintf(fp, "  \"steps\": %d,\n", g->nsamples);
@@ -132,6 +132,16 @@ int ga_write_metadata(ga_t *g)
 	fprintf(fp, "  \"image_order\": %d,\n", g->order);
 	fprintf(fp, "  \"rays\": %d,\n", g->nrays);
 	fprintf(fp, "  \"scattering\": %.10g,\n", g->scatter);
+	fprintf(fp, "  \"scattering_walls\": ");
+	{
+		double sw[GA_NWALL];
+		for (w = 0; w < GA_NWALL; w++) sw[w] = g->surf[w].scatter;
+		jput_darray(fp, sw, GA_NWALL);
+	}
+	fprintf(fp, ",\n");
+	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
+	        g->angle_dep ? "true" : "false");
+	fprintf(fp, "  \"reflecting_surfaces\": %d,\n", g->nsurf);
 	fprintf(fp, "  \"air\": { \"enabled\": %s, \"temperature_c\": %.10g, "
 	            "\"humidity_percent\": %.10g, \"pressure_kpa\": %.10g, "
 	            "\"attenuation_db_per_m\": ",

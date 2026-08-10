@@ -463,8 +463,10 @@ chkabs "ga air 4 kHz / 100 m" \
 	"$(awk -v a="$m1" -v b="$m2" 'BEGIN{printf "%.6f", 20*log(a*10.0/(b*110.0))/log(10)}')" \
 	3.28 0.5 dB
 
-echo "--- (B) rigid floor: direct + 1st-order image (+-1%)"
-# r0 = sqrt(32) = 5.65685425 m、r1 = sqrt(52) = 7.21110255 m (ga_floor.ofd 参照)
+echo "--- (B) rigid floor: direct + 1st-order image, per-surface scattering (+-1%)"
+# r0 = sqrt(32) = 5.65685425 m、r1 = sqrt(52) = 7.21110255 m (ga_floor.ofd 参照)。
+# 床だけ面ごとの散乱係数 s = 0 を与えてある (室の既定は 0.5)。面ごとの指定が
+# 効いていれば鏡面成分は減らず 1/(4 pi r) のまま — 下の (B2) と対になる判定。
 ga_run ga_floor ga_floor.ofd ga_floor.ofdx && {
 	d="$WORK/ga_floor"
 	dump "$d/rir.wav" > "$d/rir.txt"
@@ -523,10 +525,88 @@ ga_run ga_pillar ga_pillar.ofd ga_pillar.ofdx && {
 	chk "ga clear direct amplitude" "$(ga_sum "$d/clear.txt" "$tc" 0.0008)" \
 		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*sqrt(73.0))}')" 0.01
 	# 遮蔽で棄却した像の数が受音点 #1 でゼロでないこと (可視性判定が働いた証拠)
-	grep -qE "point #1: image sources up to order 3 -> [0-9]+ visible, [1-9][0-9]* blocked" \
+	grep -qE "point #1: image sources up to order 3 over [0-9]+ surfaces -> [0-9]+ visible, [1-9][0-9]* blocked" \
 		"$d/solver.log" \
 		&& say_ok "ga blocked-image count" \
 		|| say_ng "ga blocked-image count" " (visibility test did not reject anything)"
+}
+
+echo "--- (H) early specular reflection off a rigid obstacle panel (+-1%)"
+# 障害物 (geometry) 自身の低次鏡面反射が鏡像法に入っていること、および
+# 反射点が有限面からはみ出す像は棄却されること。導出は ga_panel.ofd 参照。
+ga_run ga_panel ga_panel.ofd ga_panel.ofdx && {
+	d="$WORK/ga_panel"
+	dump "$d/rir.wav" > "$d/under.txt"
+	dump "$d/rir_beyond.wav" > "$d/beyond.txt"
+	for k in 0 1; do
+		r=$(awk -v k=$k 'BEGIN{printf "%.10f", (k==0)?sqrt(17.17):sqrt(77.65)}')
+		te=$(awk -v r="$r" 'BEGIN{printf "%.10f", r/343.0}')
+		chk "ga panel #$k amplitude" "$(ga_sum "$d/under.txt" "$te" 0.001)" \
+			"$(awk -v r="$r" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+		chk "ga panel #$k arrival [s]" "$(ga_peak "$d/under.txt" "$te" 0.001)" "$te" 0.01
+	done
+	# 板の縁の外の受音点 : 直接音だけで、板反射の時刻には何も来ない
+	rb=$(awk 'BEGIN{printf "%.10f", sqrt(145.17)}')
+	tb=$(awk -v r="$rb" 'BEGIN{printf "%.10f", r/343.0}')
+	chk "ga beyond direct" "$(ga_sum "$d/beyond.txt" "$tb" 0.001)" \
+		"$(awk -v r="$rb" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+	tp=$(awk 'BEGIN{printf "%.10f", sqrt(144+0.81+60.84)/343.0}')
+	awk -v a="$(ga_sum "$d/beyond.txt" "$tp" 0.001)" -v pi="$PI" 'BEGIN {
+		ref = 1/(4*pi*sqrt(145.17)); r = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/direct=%.4f -> %s (< 0.05, 反射点が板の外)\n",
+			"ga off-panel rejected", r, (r < 0.05) ? "OK" : "NG";
+		exit (r < 0.05) ? 0 : 1 }' || status=1
+}
+
+echo "--- (B2) per-surface scattering overrides the room default"
+# 床だけ s = 0 (室の既定は 0.5)。既定値が使われてしまえば鏡面成分が
+# sqrt(0.5) = 0.707 倍になり、上の (B) の振幅判定が ±1% を大きく外れる。
+# もう一方の端 (床 s = 1 = 完全拡散) では床の鏡面像そのものが消える。
+grep -q '"image_sources": 2' "$WORK/ga_floor/metadata.json" \
+	&& say_ok "ga per-surface s=0" || say_ng "ga per-surface s=0" " (image_sources != 2)"
+rm -rf "$WORK/ga_floor_s1"; mkdir -p "$WORK/ga_floor_s1"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_floor_s1/"
+sed 's/"scattering": 0.0,/"scattering": 1.0,/' "$SRC/ga_floor.ofdx" \
+	> "$WORK/ga_floor_s1/ga_floor.ofdx"
+if "$GA_SOLVER" "$WORK/ga_floor_s1" > /dev/null 2>&1 && \
+   grep -q '"image_sources": 1' "$WORK/ga_floor_s1/metadata.json"; then
+	say_ok "ga per-surface s=1" " (完全拡散で床の鏡面像が消える)"
+else
+	say_ng "ga per-surface s=1" " (image_sources != 1)"
+fi
+
+echo "--- (I) angle-dependent absorption of a locally reacting floor (+-1%)"
+# zeta は Paris の式 alpha_stat(zeta) = (8/zeta^2)[zeta+1-2ln(1+zeta)-1/(1+zeta)]
+# を二分法で逆に解く (published な閉形式の独立実装)。導出は ga_angle.ofd 参照。
+ga_zeta() {   # ga_zeta <alpha_stat>
+	awk -v a="$1" 'function f(z) { return (8/(z*z))*(z + 1 - 2*log(1+z) - 1/(1+z)) }
+		BEGIN { lo = 1.5537; hi = 1e9;
+			for (i = 0; i < 200; i++) { m = 0.5*(lo+hi); if (f(m) > a) lo = m; else hi = m }
+			printf "%.10f", 0.5*(lo+hi) }'
+}
+ga_run ga_angle ga_angle.ofd ga_angle.ofdx && {
+	d="$WORK/ga_angle"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	r1=$(awk 'BEGIN{printf "%.10f", sqrt(457.94)}')
+	t1=$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')
+	ct=$(awk -v r="$r1" 'BEGIN{printf "%.10f", 7.5/r}')
+	zeta=$(ga_zeta 0.30)
+	chk "ga angle-dep R(theta)" "$(ga_sum "$d/rir.txt" "$t1" 0.001)" \
+		"$(awk -v r="$r1" -v z="$zeta" -v ct="$ct" -v pi="$PI" \
+		   'BEGIN{printf "%.10e", (z*ct - 1)/(z*ct + 1)/(4*pi*r)}')" 0.01
+	# 同じ入力で角度依存を off にすると R = sqrt(1-alpha) (既定 = 従来動作)
+	rm -rf "$WORK/ga_angle_off"; mkdir -p "$WORK/ga_angle_off"
+	cp "$SRC/ga_angle.ofd" "$WORK/ga_angle_off/"
+	sed 's/"angle_dependent_absorption": true/"angle_dependent_absorption": false/' \
+		"$SRC/ga_angle.ofdx" > "$WORK/ga_angle_off/ga_angle.ofdx"
+	if "$GA_SOLVER" "$WORK/ga_angle_off" > /dev/null 2>&1; then
+		dump "$WORK/ga_angle_off/rir.wav" > "$WORK/ga_angle_off/rir.txt"
+		chk "ga angle-indep sqrt(1-a)" \
+			"$(ga_sum "$WORK/ga_angle_off/rir.txt" "$t1" 0.001)" \
+			"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", sqrt(0.7)/(4*pi*r)}')" 0.01
+	else
+		say_ng "ga angle-indep sqrt(1-a)" " (solver failed)"
+	fi
 }
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
