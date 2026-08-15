@@ -21,6 +21,11 @@
 #  (F) 決定性 : 再実行 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (G) 契約 : 出力ファイル、WAV ヘッダ (48 kHz)、progress 行書式、
 #      metadata の valid_band_hz、遮蔽・近似の warning、異常系の非零終了
+#  (H) 剛体反射板の 1 次鏡面反射が閉形式と ±1% + 有限面からはみ出す像の棄却
+#  (B2) 面ごとの散乱係数が室全体の既定を上書きする (床 s = 0 / 1)
+#  (I) 局所反応境界の角度依存反射 R(theta) が Paris の式の逆解と ±1%
+#  (J) 障害物の材質 (acoustic.ga.obstacles) : alpha で鏡面反射が
+#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
 #
 # WAV の読みは od -t f4 (float32 リトルエンディアン)。CI の 3 OS
 # (Linux / macOS / Windows Git Bash) はいずれもリトルエンディアンかつ
@@ -608,6 +613,53 @@ ga_run ga_angle ga_angle.ofd ga_angle.ofdx && {
 		say_ng "ga angle-indep sqrt(1-a)" " (solver failed)"
 	fi
 }
+
+echo "--- (J) per-obstacle material via acoustic.ga.obstacles (+-1%)"
+# 同じ ga_panel の板に alpha = 0.36 を与えると 1 次板反射は
+# sqrt(1-0.36) = 0.8 倍になる。吸音で失われたエネルギーは (散乱と違い)
+# 戻らないので判定窓は無雑音のまま。導出は ga_panel.ofd の先頭コメント。
+rm -rf "$WORK/ga_panel_mat"; mkdir -p "$WORK/ga_panel_mat"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_mat/"
+sed 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_mat/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_mat" > /dev/null 2>&1; then
+	d="$WORK/ga_panel_mat"
+	dump "$d/rir.wav" > "$d/under.txt"
+	r1=$(awk 'BEGIN{printf "%.10f", sqrt(77.65)}')
+	t1=$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')
+	chk "ga obstacle alpha=0.36" "$(ga_sum "$d/under.txt" "$t1" 0.001)" \
+		"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", sqrt(1-0.36)/(4*pi*r)}')" 0.01
+	r0=$(awk 'BEGIN{printf "%.10f", sqrt(17.17)}')
+	t0d=$(awk -v r="$r0" 'BEGIN{printf "%.10f", r/343.0}')
+	chk "ga obstacle direct intact" "$(ga_sum "$d/under.txt" "$t0d" 0.001)" \
+		"$(awk -v r="$r0" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+else
+	say_ng "ga obstacle material run" " (solver failed)"
+fi
+# 板の散乱係数 = 1 (alpha 省略 = 剛体のまま) -> 板の鏡面像が拡散に回って
+# 消える (受音点 #1 の image_sources が 2 -> 1。#2 はもともと 1)。
+rm -rf "$WORK/ga_panel_s1"; mkdir -p "$WORK/ga_panel_s1"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_s1/"
+sed 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 1, "scattering": 1.0 } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_s1/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_s1" > /dev/null 2>&1 && \
+   ! grep -q '"image_sources": 2,' "$WORK/ga_panel_s1/metadata.json"; then
+	say_ok "ga obstacle scattering=1" " (板の鏡面像が消える)"
+else
+	say_ng "ga obstacle scattering=1" " (panel image should vanish)"
+fi
+# 存在しない geometry を指す行は非零終了 (黙って無視しない)
+rm -rf "$WORK/ga_badobs"; mkdir -p "$WORK/ga_badobs"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_badobs/"
+sed 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 9 } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_badobs/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_badobs" > /dev/null 2> "$WORK/ga_badobs/stderr.log"; then
+	say_ng "ga bad obstacle index" " (should fail)"
+elif grep -qi "geometry" "$WORK/ga_badobs/stderr.log"; then
+	printf "%-26s -> OK (refused with the reason)\n" "ga bad obstacle index"
+else
+	say_ng "ga bad obstacle index" " (no reason in stderr)"
+fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
 # 乱数生成器を使わない (レイ方向は球面フィボナッチ格子、拡散反射の抽選は

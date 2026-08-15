@@ -263,10 +263,16 @@ int ga_setup(ga_t *g)
 			       o->lo[2], o->hi[2]);
 	}
 	if (g->ngeom > 0)
-		ga_log(g, "obstacles: %d geometry entries treated as rigid (alpha = 0). "
-		       "Their faces are part of the image-source surface set, so their "
-		       "own low-order specular reflections are included, and they also "
-		       "occlude other paths and reflect rays.", g->ngeom);
+	{
+		int nmat = 0;
+		for (n = 0; n < g->ngeom; n++)
+			if (g->geom[n].ok && g->geom[n].has_mat) nmat++;
+		ga_log(g, "obstacles: %d geometry entries (%d with .ofdx materials, "
+		       "the rest rigid alpha = 0). Their faces are part of the "
+		       "image-source surface set, so their own low-order specular "
+		       "reflections are included, and they also occlude other paths "
+		       "and reflect rays.", g->ngeom, nmat);
+	}
 
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
 	if (g->srcx < g->x0 || g->srcx > g->x1 || g->srcy < g->y0 || g->srcy > g->y1 ||
@@ -365,7 +371,13 @@ int ga_setup(ga_t *g)
 			ga_geom_t *o = &g->geom[n];
 			int ax;
 			o->surf0 = -1;
-			if (!o->ok) continue;
+			if (!o->ok) {
+				if (o->has_mat)
+					ga_log(g, "warning: .ofdx acoustic.ga.obstacles has a "
+					       "material for geometry #%d, but that geometry has "
+					       "an unknown shape and was ignored", n + 1);
+				continue;
+			}
 			o->surf0 = si;      /* 面の並びは 2*axis + side (光線追跡が使う) */
 			for (ax = 0; ax < 3; ax++) {
 				int side, u = (ax + 1) % 3, v = (ax + 2) % 3;
@@ -376,11 +388,16 @@ int ga_setup(ga_t *g)
 					s->nrm   = side ? 1.0 : -1.0;   /* 障害物の外向き = 音場側 */
 					s->lo[0] = o->lo[u]; s->hi[0] = o->hi[u];
 					s->lo[1] = o->lo[v]; s->hi[1] = o->hi[v];
+					/* 既定は剛体 (alpha = 0)。.ofdx acoustic.ga.obstacles で
+					 * 材質があればバンド別に使う。FDTD 側は常に剛体なので、
+					 * 材質を与えると障害物の扱いは高域のみ変わる (ReadMe)。 */
 					for (b = 0; b < GA_NBAND; b++) {
-						s->alpha[b] = 0.0;
-						s->refl[b]  = 1.0;
+						double a = o->has_mat ? o->mat_alpha[b] : 0.0;
+						s->alpha[b] = a;
+						s->refl[b]  = sqrt(1.0 - a);
 					}
-					s->scatter = g->scatter;
+					s->scatter = (o->has_mat && o->mat_scatter >= 0.0)
+					           ? o->mat_scatter : g->scatter;
 					s->wall = -1;
 					s->geom = n;
 				}

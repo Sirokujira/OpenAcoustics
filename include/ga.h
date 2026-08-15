@@ -71,8 +71,11 @@ enum { GA_XM = 0, GA_XP, GA_YM, GA_YP, GA_ZM, GA_ZP, GA_NWALL };
 
 /* ── 入力要素 ──────────────────────────────────────────────────── */
 
-/* 室内の剛体障害物。可視性判定 (遮蔽) と光線追跡の反射に使う。
- * shape 1 (直方体) は lo/hi が厳密に形状と一致し、他の shape は AABB 近似。 */
+/* 室内の障害物 (既定は剛体 alpha = 0)。遮蔽・鏡像法の反射面・光線追跡の
+ * 反射に使う。shape 1 (直方体) は lo/hi が厳密に形状と一致し、他の shape は
+ * AABB 近似。材質は .ofdx の acoustic.ga.obstacles[] で与えられる
+ * (FDTD 側は geometry を常に剛体としてボクセル化するので、材質を与えると
+ * 両ソルバーの障害物の扱いは異なる — 高域にのみ効く材質指定)。 */
 typedef struct {
 	int    shape;
 	double g[8];
@@ -80,6 +83,9 @@ typedef struct {
 	int    ok;          /* 0 = 未知 shape (無視した) */
 	int    exact;       /* 1 = shape 1 (厳密)、0 = AABB 近似 */
 	int    surf0;       /* この障害物の 6 面の先頭 surf[] 添字 (無効なら -1) */
+	int    has_mat;     /* 1 = .ofdx acoustic.ga.obstacles で材質指定あり */
+	double mat_alpha[GA_NBAND];  /* バンド別吸音率 (既定 0 = 剛体) */
+	double mat_scatter;          /* 散乱係数 (< 0 = 室の既定を使う) */
 } ga_geom_t;
 
 /* 反射面 : 軸平行の有限矩形。室の 6 面と、障害物 (AABB) 1 個あたり 6 面。
