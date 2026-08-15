@@ -276,10 +276,12 @@ static int parse_receivers(ac_t *ac, js_t *j)
 	}
 }
 
-/* root.acoustic の中身 (読むのは absorption / receivers のみ、他は読み飛ばす) */
+/* root.acoustic の中身 (読むのは absorption / receivers / multi_source のみ、
+ * 他は読み飛ばす) */
 static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
+	int bv;
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
 	for (;;) {
@@ -290,6 +292,13 @@ static int walk_acoustic(ac_t *ac, js_t *j)
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "multi_source")) {
+			/* 複数音源の契約 (ADR-0010) : 既定 false = feed #1 のみ。
+			 * 幾何音響側 (ofdx_acoustic_ga) も同じキーを読む — 両ソルバーが
+			 * 同じ音源集合を使わないとハイブリッド合成が壊れるため。 */
+			if (jbool(j, &bv)) return 1;
+			ac->multi_source = bv;
 		}
 		else {
 			if (jskip(j)) return 1;

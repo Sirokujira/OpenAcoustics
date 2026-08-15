@@ -513,6 +513,7 @@ static int parse_ga(ga_t *g, js_t *j)
 static int walk_acoustic(ga_t *g, js_t *j)
 {
 	char key[64];
+	int bv;
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
 	for (;;) {
@@ -520,6 +521,14 @@ static int walk_acoustic(ga_t *g, js_t *j)
 		if (jexpect(j, ':')) return 1;
 		if (!strcmp(key, "absorption")) {
 			if (parse_absorption(g, j)) return 1;
+		}
+		else if (!strcmp(key, "multi_source")) {
+			/* 複数音源の契約 (ADR-0010) : 既定 false = feed #1 のみ。
+			 * acoustic.ga ではなく acoustic 直下 — FDTD 側も同じキーを読む
+			 * (両ソルバーが同じ音源集合を使わないとハイブリッド合成の
+			 * 帯域整合が壊れるため)。 */
+			if (jbool(j, &bv)) return 1;
+			g->multi_source = bv;
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(g, j)) return 1;

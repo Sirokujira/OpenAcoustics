@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "multi_source": true,
+    "absorption": [
+      { "enabled": true, "role": 1, "name": "Ceiling",  "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] },
+      { "enabled": true, "role": 2, "name": "SideWall", "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] },
+      { "enabled": true, "role": 3, "name": "RearWall", "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] },
+      { "enabled": true, "role": 4, "name": "Floor",    "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] }
+    ]
+  }
+}

@@ -271,7 +271,7 @@ static void img_recurse(imgctx_t *c, double chain[][3], int *seq, int depth)
 	}
 }
 
-int ga_images(ga_t *g, int ri, double *band)
+int ga_images(ga_t *g, int ri, int si, double *band)
 {
 	ga_recv_t *rv = &g->recv[ri];
 	imgctx_t c;
@@ -284,26 +284,26 @@ int ga_images(ga_t *g, int ri, double *band)
 	c.ri = ri;
 	c.band = band;
 	c.recv[0] = rv->x; c.recv[1] = rv->y; c.recv[2] = rv->z;
-	c.src[0] = g->srcx; c.src[1] = g->srcy; c.src[2] = g->srcz;
-	chain[0][0] = g->srcx; chain[0][1] = g->srcy; chain[0][2] = g->srcz;
+	c.src[0] = g->feedpos[3 * si + 0];
+	c.src[1] = g->feedpos[3 * si + 1];
+	c.src[2] = g->feedpos[3 * si + 2];
+	chain[0][0] = c.src[0]; chain[0][1] = c.src[1]; chain[0][2] = c.src[2];
 
-	rv->nimage = 0;
-	rv->nblocked = 0;
+	/* nimage/nblocked は加算のみ (リセットとまとめログは ga_synth —
+	 * 複数音源では全音源分の合計が受音点の統計になる) */
 	img_recurse(&c, chain, seq, 0);
 	free(c.seen);
 
 	if (c.oom)
-		ga_log(g, "warning: point #%d: out of memory while de-duplicating "
-		       "image sources — some reflections may be missing", ri + 1);
+		ga_log(g, "warning: point #%d source #%d: out of memory while "
+		       "de-duplicating image sources — some reflections may be missing",
+		       ri + 1, si + 1);
 	if (c.truncated)
-		ga_log(g, "warning: point #%d: the image-source search hit the node "
-		       "limit (%d) — reflections beyond that were not enumerated. "
-		       "Lower acoustic.ga.image_order or use fewer geometry entries "
-		       "(%d reflecting surfaces).",
-		       ri + 1, GA_IMAGE_NODE_MAX, g->nsurf);
-	ga_log(g, "point #%d: image sources up to order %d over %d surfaces -> "
-	       "%d visible, %d blocked by obstacles (%ld nodes searched)",
-	       ri + 1, g->order, g->nsurf, rv->nimage, rv->nblocked, c.nodes);
+		ga_log(g, "warning: point #%d source #%d: the image-source search hit "
+		       "the node limit (%d) — reflections beyond that were not "
+		       "enumerated. Lower acoustic.ga.image_order or use fewer "
+		       "geometry entries (%d reflecting surfaces).",
+		       ri + 1, si + 1, GA_IMAGE_NODE_MAX, g->nsurf);
 	return 0;
 }
 
@@ -414,19 +414,24 @@ int ga_rays(ga_t *g)
 {
 	const double golden = GA_PI * (3.0 - sqrt(5.0));
 	const double smax = GA_C0 * g->duration;
-	const double einit = 1.0 / (double)g->nrays;
+	const double einit = 1.0 / (double)g->nrays;   /* 音源 1 個あたり強度 1 */
+	const long total = (long)g->nsrc * g->nrays;
 	double lo[3], hi[3];
-	int i, prog = 0;
+	int i, sidx, prog = 0;
 
 	lo[0] = g->x0; lo[1] = g->y0; lo[2] = g->z0;
 	hi[0] = g->x1; hi[1] = g->y1; hi[2] = g->z1;
 
-	printf("solve: %d rays, image order %d over %d surfaces, %d samples at "
-	       "%d Hz, %d receivers (進捗は %d 分割)\n",
-	       g->nrays, g->order, g->nsurf, g->nsamples, GA_FS, g->nrecv,
+	printf("solve: %d rays x %d source(s), image order %d over %d surfaces, "
+	       "%d samples at %d Hz, %d receivers (進捗は %d 分割)\n",
+	       g->nrays, g->nsrc, g->order, g->nsurf, g->nsamples, GA_FS, g->nrecv,
 	       GA_PROG_TOTAL);
 	fflush(stdout);
 
+	for (sidx = 0; sidx < g->nsrc; sidx++) {
+	/* 音源ごとに決定的ハッシュ列を先頭から使う : 単一音源の既定動作と
+	 * 一致し、multi_source の各音源も単独実行と同じ列になる */
+	g->qidx = 0;
 	for (i = 0; i < g->nrays; i++) {
 		double p[3], d[3], w[GA_NBAND];
 		double z, rxy, phi, s = 0.0;
@@ -438,7 +443,9 @@ int ga_rays(ga_t *g)
 		d[0] = rxy * cos(phi);
 		d[1] = rxy * sin(phi);
 		d[2] = z;
-		p[0] = g->srcx; p[1] = g->srcy; p[2] = g->srcz;
+		p[0] = g->feedpos[3 * sidx + 0];
+		p[1] = g->feedpos[3 * sidx + 1];
+		p[2] = g->feedpos[3 * sidx + 2];
 		for (b = 0; b < GA_NBAND; b++) w[b] = einit;
 
 		for (bounce = 0; bounce < GA_MAXBOUNCE; bounce++) {
@@ -535,13 +542,15 @@ int ga_rays(ga_t *g)
 		}
 
 		{
-			int k = (int)(((long long)(i + 1) * GA_PROG_RAYS) / g->nrays);
+			int k = (int)(((long long)((long)sidx * g->nrays + i + 1)
+			               * GA_PROG_RAYS) / total);
 			while (prog < k) {
 				++prog;
 				printf("progress %d/%d\n", prog, GA_PROG_TOTAL);
 				fflush(stdout);
 			}
 		}
+	}
 	}
 	while (prog < GA_PROG_RAYS) {
 		++prog;

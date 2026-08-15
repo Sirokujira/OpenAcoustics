@@ -241,15 +241,23 @@ int ga_read_ofd(ga_t *g)
 			g->ngeom++;
 		}
 		else if (!strcmp(tok[0], "feed")) {
+			double *fp2;
 			if (ntoken < 6) {
 				ga_err(g, "invalid feed data #%d", g->nfeed + 1);
 				fclose(fp);
 				return 1;
 			}
+			fp2 = (double *)realloc(g->feedpos,
+			                        ((size_t)g->nfeed + 1) * 3 * sizeof(double));
+			if (!fp2) { ga_err(g, "out of memory (feed)"); fclose(fp); return 1; }
+			g->feedpos = fp2;
+			g->feedpos[3 * g->nfeed + 0] = atof(tok[3]);
+			g->feedpos[3 * g->nfeed + 1] = atof(tok[4]);
+			g->feedpos[3 * g->nfeed + 2] = atof(tok[5]);
 			if (g->nfeed == 0) {
-				g->srcx = atof(tok[3]);
-				g->srcy = atof(tok[4]);
-				g->srcz = atof(tok[5]);
+				g->srcx = g->feedpos[0];
+				g->srcy = g->feedpos[1];
+				g->srcz = g->feedpos[2];
 			}
 			g->nfeed++;
 		}
@@ -288,9 +296,8 @@ int ga_read_ofd(ga_t *g)
 		ga_err(g, "no feed (acoustic source position) in '%s'", g->ofd_path);
 		return 1;
 	}
-	if (g->nfeed > 1)
-		ga_log(g, "warning: %d feeds found — using feed #1 only "
-		       "(multi-source is not supported in v1)", g->nfeed);
+	/* 複数 feed の警告は ga_setup で出す (.ofdx の multi_source を読んでから
+	 * でないと「使うかどうか」が決まらないため)。 */
 	if (g->nrecv == 0) {
 		ga_err(g, "no point (receiver position) in '%s' — nothing to record",
 		       g->ofd_path);

@@ -227,7 +227,7 @@ int ga_setup(ga_t *g)
 	const double c = GA_C0;
 	double lx, ly, lz, swall[GA_NWALL], stot, rmax, tsolve;
 	double rbase;
-	int w, b, n, r;
+	int w, b, n, r, si2;
 
 	/* ── 室 ── */
 	lx = g->x1 - g->x0;
@@ -274,22 +274,40 @@ int ga_setup(ga_t *g)
 		       "and reflect rays.", g->ngeom, nmat);
 	}
 
+	/* ── 使用する音源集合 (複数音源の契約 : ADR-0010) ──
+	 * 既定は feed #1 のみ (従来動作と完全一致)。multi_source なら全 feed を
+	 * 強度 1 で t = 0 に同時発火し、RIR は重ね合わせになる (1/N 正規化なし)。 */
+	g->nsrc = (g->multi_source && g->nfeed > 0) ? g->nfeed : 1;
+	if (g->nfeed > 1 && !g->multi_source)
+		ga_log(g, "warning: %d feeds found — using feed #1 only "
+		       "(set acoustic.multi_source in the .ofdx to sum all sources)",
+		       g->nfeed);
+	if (g->multi_source)
+		ga_log(g, "multi_source: %d feed(s) fire simultaneously at t = 0 — "
+		       "rir.wav is the superposition (unit strength each, no 1/N)",
+		       g->nsrc);
+
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
-	if (g->srcx < g->x0 || g->srcx > g->x1 || g->srcy < g->y0 || g->srcy > g->y1 ||
-	    g->srcz < g->z0 || g->srcz > g->z1) {
-		ga_err(g, "feed position (%.4g, %.4g, %.4g) is outside the room "
-		       "[%.4g,%.4g] x [%.4g,%.4g] x [%.4g,%.4g]",
-		       g->srcx, g->srcy, g->srcz, g->x0, g->x1, g->y0, g->y1,
-		       g->z0, g->z1);
-		return 1;
-	}
-	n = geom_containing(g, g->srcx, g->srcy, g->srcz);
-	if (n >= 0) {
-		ga_err(g, "feed position (%.4g, %.4g, %.4g) is inside rigid geometry "
-		       "#%d (shape %d) — move the source out of the object "
-		       "(e.g. 1.5 m above the stage floor)",
-		       g->srcx, g->srcy, g->srcz, n + 1, g->geom[n].shape);
-		return 1;
+	for (si2 = 0; si2 < g->nsrc; si2++) {
+		double sx = g->feedpos[3 * si2 + 0];
+		double sy = g->feedpos[3 * si2 + 1];
+		double sz = g->feedpos[3 * si2 + 2];
+		if (sx < g->x0 || sx > g->x1 || sy < g->y0 || sy > g->y1 ||
+		    sz < g->z0 || sz > g->z1) {
+			ga_err(g, "feed #%d position (%.4g, %.4g, %.4g) is outside the "
+			       "room [%.4g,%.4g] x [%.4g,%.4g] x [%.4g,%.4g]",
+			       si2 + 1, sx, sy, sz, g->x0, g->x1, g->y0, g->y1,
+			       g->z0, g->z1);
+			return 1;
+		}
+		n = geom_containing(g, sx, sy, sz);
+		if (n >= 0) {
+			ga_err(g, "feed #%d position (%.4g, %.4g, %.4g) is inside rigid "
+			       "geometry #%d (shape %d) — move the source out of the "
+			       "object (e.g. 1.5 m above the stage floor)",
+			       si2 + 1, sx, sy, sz, n + 1, g->geom[n].shape);
+			return 1;
+		}
 	}
 	rmax = 0.0;
 	for (r = 0; r < g->nrecv; r++) {
@@ -312,15 +330,19 @@ int ga_setup(ga_t *g)
 			       r + 1, rv->x, rv->y, rv->z, n + 1, g->geom[n].shape);
 			return 1;
 		}
-		dx = rv->x - g->srcx; dy = rv->y - g->srcy; dz = rv->z - g->srcz;
-		d = sqrt(dx * dx + dy * dy + dz * dz);
-		if (d < 1e-6) {
-			ga_err(g, "point #%d coincides with the feed position "
-			       "(%.4g, %.4g, %.4g) — the direct sound 1/(4 pi r) diverges",
-			       r + 1, rv->x, rv->y, rv->z);
-			return 1;
+		for (si2 = 0; si2 < g->nsrc; si2++) {
+			dx = rv->x - g->feedpos[3 * si2 + 0];
+			dy = rv->y - g->feedpos[3 * si2 + 1];
+			dz = rv->z - g->feedpos[3 * si2 + 2];
+			d = sqrt(dx * dx + dy * dy + dz * dz);
+			if (d < 1e-6) {
+				ga_err(g, "point #%d coincides with feed #%d "
+				       "(%.4g, %.4g, %.4g) — the direct sound 1/(4 pi r) "
+				       "diverges", r + 1, si2 + 1, rv->x, rv->y, rv->z);
+				return 1;
+			}
+			if (d > rmax) rmax = d;
 		}
-		if (d > rmax) rmax = d;
 		recv_filename(rv, r);
 	}
 
@@ -551,10 +573,15 @@ int ga_setup(ga_t *g)
 		dw[2] = rv->y - g->y0; dw[3] = g->y1 - rv->y;
 		dw[4] = rv->z - g->z0; dw[5] = g->z1 - rv->z;
 		for (i = 0; i < 6; i++) if (0.9 * dw[i] < lim) lim = 0.9 * dw[i];
-		d = sqrt((rv->x - g->srcx) * (rv->x - g->srcx)
-		       + (rv->y - g->srcy) * (rv->y - g->srcy)
-		       + (rv->z - g->srcz) * (rv->z - g->srcz));
-		if (0.5 * d < lim) lim = 0.5 * d;
+		for (si2 = 0; si2 < g->nsrc; si2++) {
+			d = sqrt((rv->x - g->feedpos[3 * si2 + 0])
+			           * (rv->x - g->feedpos[3 * si2 + 0])
+			       + (rv->y - g->feedpos[3 * si2 + 1])
+			           * (rv->y - g->feedpos[3 * si2 + 1])
+			       + (rv->z - g->feedpos[3 * si2 + 2])
+			           * (rv->z - g->feedpos[3 * si2 + 2]));
+			if (0.5 * d < lim) lim = 0.5 * d;
+		}
 		for (n = 0; n < g->ngeom; n++) {
 			if (!g->geom[n].ok) continue;
 			d = 0.9 * geom_distance(&g->geom[n], rv->x, rv->y, rv->z);
@@ -572,8 +599,12 @@ int ga_setup(ga_t *g)
 		       "r = %.4g m -> %s", r + 1, rv->name[0] ? " " : "", rv->name,
 		       rv->x, rv->y, rv->z, rv->radius, rv->file);
 	}
-	ga_log(g, "source: (%.6g, %.6g, %.6g) m (t = 0 は音源発火時刻 — 直接音は "
-	       "t = r/c に立つ)", g->srcx, g->srcy, g->srcz);
+	for (si2 = 0; si2 < g->nsrc; si2++)
+		ga_log(g, "source #%d: (%.6g, %.6g, %.6g) m%s", si2 + 1,
+		       g->feedpos[3 * si2 + 0], g->feedpos[3 * si2 + 1],
+		       g->feedpos[3 * si2 + 2],
+		       (si2 == 0) ? " (t = 0 は音源発火時刻 — 直接音は t = r/c に立つ)"
+		                  : "");
 
 	/* ── 有効帯域 ── */
 	{
