@@ -67,7 +67,8 @@ typedef struct {
 	int        nonuniform;             /* 非一様メッシュだったか (警告用) */
 	ac_geom_t *geom;
 	int        ngeom;
-	double     srcx, srcy, srcz;       /* feed #1 の位置 */
+	double     srcx, srcy, srcz;       /* feed #1 の位置 (metadata の source 用) */
+	double    *feedpos;                /* 全 feed の座標 (3 * nfeed) */
 	int        nfeed;
 	ac_recv_t *recv;
 	int        nrecv;
@@ -77,6 +78,12 @@ typedef struct {
 	/* .ofdx (吸音率、壁ごと。帯域平均済み) */
 	int    have_ofdx;
 	double alpha[AC_NWALL];
+	/* 複数音源 (契約は OpenFDTD-X の ADR-0010) : .ofdx acoustic.multi_source
+	 * (既定 false = feed #1 のみ = 従来動作)。true で全 feed に同一の
+	 * ガウシアン微分パルスを注入し (共通 t0)、rir.wav は重ね合わせになる。
+	 * 幾何音響側 (ofdx_acoustic_ga) と**対称に**実装する — ハイブリッド合成
+	 * (ADR-0008) のバンドエネルギー整合は両ソルバーが同じ音源集合を使う前提。 */
+	int    multi_source;
 
 	/* 格子と時間 */
 	double dx;
@@ -88,7 +95,9 @@ typedef struct {
 	double tsab;          /* Sabine 残響時間 (A=0 のとき -1) */
 	double fmax;          /* 音源設計帯域 = c/(10 dx) */
 	double sigma, t0;     /* ガウシアン微分パルスの幅と遅延 */
-	int    isrc, jsrc, ksrc;
+	int    isrc, jsrc, ksrc;           /* feed #1 のセル (metadata 用) */
+	int    nsrc;                       /* 使用する音源数 (= multi ? nfeed : 1) */
+	int   *srccell;                    /* 使用音源のセル (i,j,k の 3 * nsrc) */
 
 	/* 境界係数 (半陰的局所インピーダンス更新 v+ = wA v- ± wB p) */
 	int    wrigid[AC_NWALL];  /* 1 = 剛壁 (更新しない) */

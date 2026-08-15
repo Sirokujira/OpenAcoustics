@@ -132,7 +132,8 @@ typedef struct {
 	double     dxmin;                   /* メッシュ最小刻み (受音点名の照合許容) */
 	ga_geom_t *geom;
 	int        ngeom;
-	double     srcx, srcy, srcz;
+	double     srcx, srcy, srcz;        /* feed #1 (metadata の source 用) */
+	double    *feedpos;                 /* 全 feed の座標 (3 * nfeed) */
 	int        nfeed;
 	ga_recv_t *recv;
 	int        nrecv;
@@ -151,6 +152,13 @@ typedef struct {
 	/* 幾何音響パラメータ */
 	int    order;                        /* 鏡像法の次数 (1..3) */
 	int    nrays;
+	/* 複数音源 (契約は OpenFDTD-X の ADR-0010) : .ofdx acoustic.multi_source
+	 * (既定 false = feed #1 のみ)。true で全 feed を強度 1 で t = 0 に
+	 * 同時発火し、rir.wav は重ね合わせになる。1/N 正規化はしない。
+	 * FDTD 側と**対称に**実装する (ハイブリッド合成のバンドエネルギー
+	 * 整合 (ADR-0008) は両ソルバーが同じ音源集合を使う前提)。 */
+	int    multi_source;
+	int    nsrc;                         /* 使用する音源数 (= multi ? nfeed : 1) */
 	double scatter;                      /* 拡散反射の割合 (0..1、既定値) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
 	long   qidx;                         /* 決定的ハッシュ列の位置 */
@@ -230,9 +238,11 @@ double ga_zeta_from_alpha(double alpha_stat);   /* 逆問題 (zeta >= peak の�
 #define GA_ALPHA_STAT_MAX 0.9514   /* 局所反応・実インピーダンスの上限 (概数) */
 
 /* ga_trace.c : 鏡像法 (早期反射) と光線追跡 (後期残響)
- *   ga_images : 受音点 r の可視な鏡像音源を band[] へ置く
- *   ga_rays   : 全受音点のエコーグラム echo[] を 1 パスで埋める (進捗はここ) */
-int ga_images(ga_t *g, int r, double *band);
+ *   ga_images : 音源 si (feedpos の添字) から受音点 r への可視な鏡像を
+ *               band[] へ置く。受音点統計 (nimage/nblocked) は加算するだけ
+ *               なので、リセットとまとめログは呼び出し側 (ga_synth)。
+ *   ga_rays   : 全音源 x 全受音点のエコーグラム echo[] を埋める (進捗はここ) */
+int ga_images(ga_t *g, int r, int si, double *band);
 int ga_rays(ga_t *g);
 
 /* ga_synth.c : バンド別インパルス列 + エコーグラム -> RIR

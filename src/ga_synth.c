@@ -182,7 +182,18 @@ int ga_synth(ga_t *g)
 		int k;
 
 		memset(g->band, 0, (size_t)GA_NBAND * g->nsamples * sizeof(double));
-		if (ga_images(g, r, g->band) != 0) return 1;
+		{
+			int sidx;
+			g->recv[r].nimage = 0;
+			g->recv[r].nblocked = 0;
+			for (sidx = 0; sidx < g->nsrc; sidx++)
+				if (ga_images(g, r, sidx, g->band) != 0) return 1;
+			ga_log(g, "point #%d: image sources up to order %d over %d "
+			       "surfaces -> %d visible, %d blocked by obstacles "
+			       "(%d source%s)", r + 1, g->order, g->nsurf,
+			       g->recv[r].nimage, g->recv[r].nblocked,
+			       g->nsrc, (g->nsrc > 1) ? "s" : "");
+		}
 		synth_tail(g, r, g->band);
 
 		memset(g->yr, 0, (size_t)g->fftn * sizeof(double));

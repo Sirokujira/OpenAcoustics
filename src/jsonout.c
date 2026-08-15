@@ -76,6 +76,17 @@ int ac_write_metadata(ac_t *ac)
 	fprintf(fp, "    \"sigma_s\": %.10g,\n", ac->sigma);
 	fprintf(fp, "    \"t0_s\": %.10g\n", ac->t0);
 	fprintf(fp, "  },\n");
+	/* 複数音源の契約 (ADR-0010) : source は feed #1 のまま (互換)、使用した
+	 * 全音源はスナップ後のセル中心で sources に列挙する。 */
+	fprintf(fp, "  \"multi_source\": %s,\n", ac->multi_source ? "true" : "false");
+	fprintf(fp, "  \"sources\": [\n");
+	for (r = 0; r < ac->nsrc; r++)
+		fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g] }%s\n",
+		        ac->x0 + (ac->srccell[3 * r + 0] + 0.5) * ac->dx,
+		        ac->y0 + (ac->srccell[3 * r + 1] + 0.5) * ac->dx,
+		        ac->z0 + (ac->srccell[3 * r + 2] + 0.5) * ac->dx,
+		        (r + 1 < ac->nsrc) ? "," : "");
+	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"receivers\": [\n");
 	for (r = 0; r < ac->nrecv; r++) {
 		const ac_recv_t *rv = &ac->recv[r];

@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 95 判定 (FDTD 40 + 幾何音響 55)。1 本のスクリプトが
+# 検証 : 解析解との比較 107 判定 (FDTD 43 + 幾何音響 64)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**95 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**107 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -97,6 +97,12 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
    (こちらだけ先に変えない)。metadata.json はキー追加のみ可 (削除・改名禁止)。
 6. **数値を捏造しない**: 入力が読めない・feed/point が無い・セル総数 > 3000 万
    は非零終了 + stderr に理由。合成 RIR を出して正常終了しない。
+7. **複数音源 (multi_source) は両ソルバーで対称**: 契約は OpenFDTD-X の
+   ADR-0010。`.ofdx` の `acoustic.multi_source` (既定 false = feed #1 のみ =
+   従来動作) を両ソルバーが同じ意味で読む。true では全 feed に同一パルスを
+   注入した重ね合わせ (1/N 正規化なし)。ハイブリッド合成 (ADR-0008) の
+   バンドエネルギー整合は両ソルバーが同じ音源集合を使う前提なので、
+   **片方だけ変えてはいけない**。番人は (h) 線形性判定と (K)。
 
 ## 幾何音響 (ofdx_acoustic_ga) の不変条件 — 番人は acoustic_check.sh の (A)〜(G)
 
@@ -193,8 +199,8 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 - 幾何音響の拡張は `.ofdx` の `acoustic.ga` に足す (未知キー無視を保つ)。
   FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
   両ソルバーで共有できる。**この性質を壊さないこと**。
-- 幾何音響で未対応のもの (非直方体の室・バンド別散乱係数・回折・複数音源)
-  は ReadMe の「幾何音響の制約」に書いてある。障害物の材質は
+- 幾何音響で未対応のもの (非直方体の室・バンド別散乱係数・回折・音源ごとの
+  ゲイン/遅延/指向性) は ReadMe の「幾何音響の制約」に書いてある。障害物の材質は
   `.ofdx` の `acoustic.ga.obstacles[]` で対応済み (既定は剛体 — FDTD 側は
   常に剛体なので、指定すると高域のみ材質が効く点は ReadMe に明記)。
   実装したら制約表からも消すこと。逆に、原理的に無理なもの (回折、

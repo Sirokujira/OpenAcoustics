@@ -11,6 +11,8 @@
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
+#  (h) 複数音源 (multi_source) : 2 feed の同時発火が各 feed 単独の和に一致
+#      (離散更新の線形性、L2 相対 1e-5)
 #
 # ── ofdx_acoustic_ga (高域担当、幾何音響) の判定 :
 #  (A) 自由音場 : 直接音の時刻 t = r/c と振幅 1/(4 pi r) が ±1%
@@ -26,6 +28,8 @@
 #  (I) 局所反応境界の角度依存反射 R(theta) が Paris の式の逆解と ±1%
 #  (J) 障害物の材質 (acoustic.ga.obstacles) : alpha で鏡面反射が
 #      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
+#  (K) 複数音源 (multi_source) : 2 音源の直接音がそれぞれ 1/(4 pi r_i) ±1%、
+#      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
 #
 # WAV の読みは od -t f4 (float32 リトルエンディアン)。CI の 3 OS
 # (Linux / macOS / Windows Git Bash) はいずれもリトルエンディアンかつ
@@ -319,6 +323,38 @@ if "$SOLVER" > /dev/null 2>&1; then
 	printf "%-26s -> NG (should fail)\n" "usage exit" >&2; status=1
 else
 	printf "%-26s -> OK\n" "usage exit"
+fi
+
+
+echo "--- (h) multi-source superposition (linearity, .ofdx acoustic.multi_source)"
+# super2.ofd の 2 feed を multi_source で同時発火した RIR は、各 feed 単独の
+# RIR の標本ごとの和に一致する (離散更新の線形性 — 導出と許容誤差の根拠は
+# super2.ofd の先頭コメント。float32 量子化 ~6e-8 が支配、許容 1e-5)。
+for v in ab a b; do rm -rf "$WORK/super_$v"; mkdir -p "$WORK/super_$v"; done
+cp "$SRC/super2.ofd" "$SRC/super2.ofdx" "$WORK/super_ab/"
+grep -v "^feed = z 3.15" "$SRC/super2.ofd" > "$WORK/super_a/super2.ofd"
+cp "$SRC/super2.ofdx" "$WORK/super_a/"
+grep -v "^feed = z 0.55" "$SRC/super2.ofd" > "$WORK/super_b/super2.ofd"
+cp "$SRC/super2.ofdx" "$WORK/super_b/"
+sup_ok=1
+for v in ab a b; do
+	"$SOLVER" "$WORK/super_$v" > /dev/null 2>&1 || sup_ok=0
+done
+if [ "$sup_ok" = "1" ]; then
+	for v in ab a b; do dump "$WORK/super_$v/rir.wav" > "$WORK/super_$v/rir.txt"; done
+	paste "$WORK/super_ab/rir.txt" "$WORK/super_a/rir.txt" "$WORK/super_b/rir.txt" | awk \
+		'{ dd = $1 - ($2 + $3); e2 += dd * dd; r2 += $1 * $1 }
+		END {
+			rel = sqrt(e2 / r2);
+			printf "%-26s L2 rel err=%.3e -> %s (<= 1e-5)\n", "fdtd superposition", rel, (rel <= 1e-5) ? "OK" : "NG";
+			exit (rel <= 1e-5) ? 0 : 1
+		}' || status=1
+	grep -q '"multi_source": true' "$WORK/super_ab/metadata.json" \
+		&& say_ok "fdtd multi_source metadata" || say_ng "fdtd multi_source metadata"
+	grep -Fq '{ "pos_m": [3.15, 2.35, 1.95] }' "$WORK/super_ab/metadata.json" \
+		&& say_ok "fdtd sources listed" || say_ng "fdtd sources listed"
+else
+	say_ng "fdtd superposition" " (solver failed)"
 fi
 
 ###############################################################################
@@ -659,6 +695,53 @@ elif grep -qi "geometry" "$WORK/ga_badobs/stderr.log"; then
 	printf "%-26s -> OK (refused with the reason)\n" "ga bad obstacle index"
 else
 	say_ng "ga bad obstacle index" " (no reason in stderr)"
+fi
+
+echo "--- (K) multi-source: two feeds, two closed-form arrivals (+-1%)"
+# 契約 (OpenFDTD-X ADR-0010) : multi_source で全 feed が強度 1・t = 0 で
+# 同時発火し、rir.wav は重ね合わせ。導出は ga_two.ofd の先頭コメント。
+ga_run ga_two ga_two.ofd ga_two.ofdx && {
+	d="$WORK/ga_two"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	for k in 1 2; do
+		r=$(awk -v k=$k 'BEGIN{print (k==1)?10.0:20.0}')
+		te=$(awk -v r="$r" 'BEGIN{printf "%.10f", r/343.0}')
+		chk "ga two-src #$k amplitude" "$(ga_sum "$d/rir.txt" "$te" 0.001)" \
+			"$(awk -v r="$r" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+		chk "ga two-src #$k arrival" "$(ga_peak "$d/rir.txt" "$te" 0.001)" "$te" 0.01
+	done
+	grep -q '"multi_source": true' "$d/metadata.json" \
+		&& say_ok "ga multi_source metadata" || say_ng "ga multi_source metadata"
+	grep -Fq '{ "pos_m": [35, 10, 10] }' "$d/metadata.json" \
+		&& say_ok "ga sources listed" || say_ng "ga sources listed"
+}
+# 既定 (multi_source なし) は feed #1 のみ + warning (後方互換)
+rm -rf "$WORK/ga_two_def"; mkdir -p "$WORK/ga_two_def"
+cp "$SRC/ga_two.ofd" "$WORK/ga_two_def/"
+sed '/"multi_source"/d' "$SRC/ga_two.ofdx" > "$WORK/ga_two_def/ga_two.ofdx"
+if "$GA_SOLVER" "$WORK/ga_two_def" > /dev/null 2>&1; then
+	grep -q "warning: 2 feeds" "$WORK/ga_two_def/solver.log" \
+		&& say_ok "ga default single-source" " (warning)" \
+		|| say_ng "ga default single-source" " (no warning)"
+	dump "$WORK/ga_two_def/rir.wav" > "$WORK/ga_two_def/rir.txt"
+	t2=$(awk 'BEGIN{printf "%.10f", 20.0/343.0}')
+	awk -v a="$(ga_sum "$WORK/ga_two_def/rir.txt" "$t2" 0.001)" -v pi="$PI" 'BEGIN {
+		ref = 1/(4*pi*20.0); rr = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/would-be=%.4f -> %s (< 0.05, feed #2 不使用)\n", "ga default no 2nd arrival", rr, (rr < 0.05) ? "OK" : "NG";
+		exit (rr < 0.05) ? 0 : 1 }' || status=1
+else
+	say_ng "ga default single-source" " (solver failed)"
+fi
+# multi_source では全音源が室内になければならない (室外は非零終了)
+rm -rf "$WORK/ga_two_out"; mkdir -p "$WORK/ga_two_out"
+sed 's/^feed = z 35.0/feed = z 150.0/' "$SRC/ga_two.ofd" > "$WORK/ga_two_out/ga_two.ofd"
+cp "$SRC/ga_two.ofdx" "$WORK/ga_two_out/"
+if "$GA_SOLVER" "$WORK/ga_two_out" > /dev/null 2> "$WORK/ga_two_out/stderr.log"; then
+	say_ng "ga multi-src outside exit" " (should fail)"
+elif grep -qi "feed #2" "$WORK/ga_two_out/stderr.log"; then
+	printf "%-26s -> OK (feed #2 を指して拒否)\n" "ga multi-src outside exit"
+else
+	say_ng "ga multi-src outside exit" " (no feed # in stderr)"
 fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"

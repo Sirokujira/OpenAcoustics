@@ -340,30 +340,55 @@ int ac_setup(ac_t *ac)
 					!ac->solid[((size_t)(k - 1) * ny + j) * nx + i] &&
 					!ac->solid[((size_t)k * ny + j) * nx + i];
 
-	/* ── 音源・受音点のスナップ (剛体セル内は誤りなので正直に失敗する) ── */
-	ac->isrc = snap_cell(ac->srcx, ac->x0, ac->dx, nx);
-	ac->jsrc = snap_cell(ac->srcy, ac->y0, ac->dx, ny);
-	ac->ksrc = snap_cell(ac->srcz, ac->z0, ac->dx, nz);
-	if (ac->solid[((size_t)ac->ksrc * ny + ac->jsrc) * nx + ac->isrc]) {
-		int gi = geom_containing(ac, ac->srcx, ac->srcy, ac->srcz);
-		if (gi >= 0)
-			ac_err(ac, "feed position (%.4g, %.4g, %.4g) is inside rigid "
-			       "geometry #%d (shape %d) — move the source out of the "
-			       "object (e.g. 1.5 m above the stage floor)",
-			       ac->srcx, ac->srcy, ac->srcz, gi + 1, ac->geom[gi].shape);
-		else
-			ac_err(ac, "feed position (%.4g, %.4g, %.4g) is inside rigid "
-			       "geometry — move the source out of the object "
-			       "(e.g. 1.5 m above the stage floor)",
-			       ac->srcx, ac->srcy, ac->srcz);
+	/* ── 使用する音源集合 (複数音源の契約 : ADR-0010) ──
+	 * 既定は feed #1 のみ (従来動作と完全一致)。multi_source なら全 feed に
+	 * 同一パルス (共通 t0) を注入し、RIR は重ね合わせになる。 */
+	ac->nsrc = (ac->multi_source && ac->nfeed > 0) ? ac->nfeed : 1;
+	if (ac->nfeed > 1 && !ac->multi_source)
+		ac_log(ac, "warning: %d feeds found — using feed #1 only "
+		       "(set acoustic.multi_source in the .ofdx to sum all sources)",
+		       ac->nfeed);
+	if (ac->multi_source)
+		ac_log(ac, "multi_source: %d feed(s) fire the same pulse "
+		       "simultaneously — rir.wav is the superposition "
+		       "(unit strength each, no 1/N)", ac->nsrc);
+	ac->srccell = (int *)calloc((size_t)ac->nsrc * 3, sizeof(int));
+	if (!ac->srccell) {
+		ac_err(ac, "out of memory (%d sources)", ac->nsrc);
 		return 1;
 	}
-	ac_log(ac, "source: (%.6g, %.6g, %.6g) m -> cell (%d, %d, %d), "
-	       "center (%.6g, %.6g, %.6g) m", ac->srcx, ac->srcy, ac->srcz,
-	       ac->isrc, ac->jsrc, ac->ksrc,
-	       ac->x0 + (ac->isrc + 0.5) * ac->dx,
-	       ac->y0 + (ac->jsrc + 0.5) * ac->dx,
-	       ac->z0 + (ac->ksrc + 0.5) * ac->dx);
+
+	/* ── 音源・受音点のスナップ (剛体セル内は誤りなので正直に失敗する) ── */
+	for (n = 0; n < ac->nsrc; n++) {
+		double sx = ac->feedpos[3 * n + 0];
+		double sy = ac->feedpos[3 * n + 1];
+		double sz = ac->feedpos[3 * n + 2];
+		int is = snap_cell(sx, ac->x0, ac->dx, nx);
+		int js = snap_cell(sy, ac->y0, ac->dx, ny);
+		int ks = snap_cell(sz, ac->z0, ac->dx, nz);
+		if (ac->solid[((size_t)ks * ny + js) * nx + is]) {
+			int gi = geom_containing(ac, sx, sy, sz);
+			if (gi >= 0)
+				ac_err(ac, "feed #%d position (%.4g, %.4g, %.4g) is inside "
+				       "rigid geometry #%d (shape %d) — move the source out "
+				       "of the object (e.g. 1.5 m above the stage floor)",
+				       n + 1, sx, sy, sz, gi + 1, ac->geom[gi].shape);
+			else
+				ac_err(ac, "feed #%d position (%.4g, %.4g, %.4g) is inside "
+				       "rigid geometry — move the source out of the object "
+				       "(e.g. 1.5 m above the stage floor)", n + 1, sx, sy, sz);
+			return 1;
+		}
+		ac->srccell[3 * n + 0] = is;
+		ac->srccell[3 * n + 1] = js;
+		ac->srccell[3 * n + 2] = ks;
+		if (n == 0) { ac->isrc = is; ac->jsrc = js; ac->ksrc = ks; }
+		ac_log(ac, "source #%d: (%.6g, %.6g, %.6g) m -> cell (%d, %d, %d), "
+		       "center (%.6g, %.6g, %.6g) m", n + 1, sx, sy, sz, is, js, ks,
+		       ac->x0 + (is + 0.5) * ac->dx,
+		       ac->y0 + (js + 0.5) * ac->dx,
+		       ac->z0 + (ks + 0.5) * ac->dx);
+	}
 	for (n = 0; n < ac->nrecv; n++) {
 		ac_recv_t *r = &ac->recv[n];
 		r->ic = snap_cell(r->x, ac->x0, ac->dx, nx);
@@ -406,7 +431,6 @@ int ac_run(ac_t *ac)
 	const int nx = ac->nx, ny = ac->ny, nz = ac->nz;
 	const double cv = ac->dt / (AC_RHO0 * ac->dx);          /* v 更新係数 */
 	const double cp = AC_RHO0 * AC_C0 * AC_C0 * ac->dt / ac->dx; /* p 更新係数 */
-	const size_t srcidx = ((size_t)ac->ksrc * ny + ac->jsrc) * nx + ac->isrc;
 	double *p = ac->p, *vx = ac->vx, *vy = ac->vy, *vz = ac->vz;
 	const unsigned char *mvx = ac->mvx, *mvy = ac->mvy, *mvz = ac->mvz;
 	const unsigned char *solid = ac->solid;
@@ -538,8 +562,16 @@ int ac_run(ac_t *ac)
 			}
 		}
 
-		/* ── ソフト音源 (直列) ── */
-		p[srcidx] += src_pulse(ac, (n + 1) * ac->dt);
+		/* ── ソフト音源 (直列)。multi_source なら全音源セルへ同一パルス —
+		 * 離散更新は線形なので、結果は各音源単独の RIR の厳密な和 ── */
+		{
+			const double sp = src_pulse(ac, (n + 1) * ac->dt);
+			int si2;
+			for (si2 = 0; si2 < ac->nsrc; si2++)
+				p[((size_t)ac->srccell[3 * si2 + 2] * ny
+				   + ac->srccell[3 * si2 + 1]) * nx
+				  + ac->srccell[3 * si2 + 0]] += sp;
+		}
 
 		/* ── 受音点記録 (サンプル n の時刻は (n+1)·dt — 1 サンプル未満の
 		 * オフセットで、パルス幅 σ ≫ dt に対して無視できる) ── */
@@ -565,6 +597,8 @@ int ac_run(ac_t *ac)
 void ac_free(ac_t *ac)
 {
 	free(ac->geom);  ac->geom = NULL;
+	free(ac->feedpos); ac->feedpos = NULL;
+	free(ac->srccell); ac->srccell = NULL;
 	free(ac->recv);  ac->recv = NULL;
 	free(ac->freq1); ac->freq1 = NULL;
 	free(ac->p);     ac->p = NULL;

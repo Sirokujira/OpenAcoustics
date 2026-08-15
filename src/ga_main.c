@@ -76,6 +76,7 @@ void ga_free(ga_t *g)
 {
 	free(g->geom); g->geom = NULL;
 	free(g->surf); g->surf = NULL;
+	free(g->feedpos); g->feedpos = NULL;
 	free(g->recv); g->recv = NULL;
 	free(g->echo); g->echo = NULL;
 	free(g->rir);  g->rir  = NULL;
