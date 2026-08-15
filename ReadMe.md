@@ -236,10 +236,12 @@ W<sub>0</sub> = 1 (f ≤ 125 Hz)、W<sub>6</sub> = 1 (f ≥ 8 kHz)
 | `air_absorption` | true | — | 空気吸収の有無 |
 | `receiver_radius_m` | 自動 | 0〜10 | 受音検出球の半径 (自動は V<sup>1/3</sup>/10 を 0.3〜1.5 m に制限し、壁・障害物・音源に食い込まないよう切り詰める) |
 | `duration_s` | 自動 | 0〜10 | 計算時間 (自動は clamp(1.5·max<sub>b</sub> T<sub>Eyring</sub>, 0.5, 3.0) s、最遠受音点の直接音が必ず入るよう下限も確保) |
+| `obstacles` | — | — | 障害物ごとの材質: `[{ "geometry": 1, "alpha": [6 値], "scattering": 0.4 }]`。`geometry` は `.ofd` の geometry 行の **1 起点**の番号 (solver.log の `geometry #N` と同じ)。`alpha` 省略 = 剛体のまま、`scattering` 省略 = 室の既定。存在しない番号は非零終了 |
 
 面ごとの散乱係数は `acoustic.absorption[]` の各行に `"scattering": 0.4` を
 足して指定する (省略時は上の `acoustic.ga.scattering`)。role → 壁の対応は
-吸音率と同じ。**バンド別の散乱係数は未対応** — 1 本のレイが 7 バンドの
+吸音率と同じ。`alpha` 配列は通常 6 値 (GUI が書く形) だが、**7 値を書けば
+8 kHz バンドも外挿ではなく直接指定できる**。**バンド別の散乱係数は未対応** — 1 本のレイが 7 バンドの
 エネルギーをまとめて運ぶので、バンドごとに別々の散乱判定ができないため
 (対応するにはバンド数だけ追跡し直す必要がある)。
 
@@ -253,7 +255,8 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 `cells: [0,0,0]` + `gridless: true`)、以下を追加する:
 `valid_band_hz` / `bands_hz` / `boundary_alpha_bands` / `image_order` /
 `rays` / `scattering` / `scattering_walls` / `angle_dependent_absorption` /
-`reflecting_surfaces` / `air` (温湿度・気圧・バンド別 dB/m) /
+`reflecting_surfaces` / `obstacle_materials` /
+`air` (温湿度・気圧・バンド別 dB/m) /
 `t_eyring_s` / `t_sabine_bands_s` / `room` / `method` /
 `amplitude_convention` / `time_origin`、受音点ごとに
 `sphere_radius_m` / `image_sources` / `image_sources_blocked` / `ray_detections`。
@@ -268,10 +271,13 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
   室形状は `.ofd` に書く手段が無い (メッシュ範囲は必ず直方体) ため、
   GUI/フォーマット側の拡張が要る。扇形ホール等は `geometry` の剛体を
   並べて近似するしかない。
-- **`geometry` は剛体 (α = 0) の障害物**。その 6 面は鏡像法の反射面集合に
-  入るので低次の鏡面反射も出るが、**吸音率と散乱係数は指定できない**
-  (α = 0 固定、散乱係数は室全体の既定値)。`.ofd`/`.ofdx` に障害物ごとの
-  材質を書く場所が無いため。shape 1 (直方体) は厳密、その他の shape は
+- **`geometry` の障害物は既定で剛体 (α = 0)**。その 6 面は鏡像法の反射面
+  集合に入るので低次の鏡面反射も出る。材質は `.ofdx` の
+  `acoustic.ga.obstacles[]` で与えられる (下記) が、**FDTD 側は geometry を
+  常に剛体としてボクセル化する**ので、材質を与えると障害物の扱いが
+  低域 (剛体) と高域 (吸音) で異なる点に注意。透過は扱わない (α は
+  「戻らないエネルギー」であって、障害物の向こうへは届かない — 遮蔽は
+  材質によらず効く)。shape 1 (直方体) は厳密、その他の shape は
   **AABB 近似** (warning)。
 - **回折・干渉・位相は扱わない** (幾何音響の原理的な制約)。反射板や衝立の
   縁での回折が効く低域では、影の側の音圧を過小評価する。
@@ -301,8 +307,8 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 
 ## 検証ケース (data/sample/ — 期待値はすべて実装から独立な解析解)
 
-`acoustic_check.sh` が CI (3 OS + sanitize) で全 91 判定 (FDTD 40 +
-幾何音響 51) を実行する。各 `.ofd` の先頭コメントに期待値の導出が書いてある。
+`acoustic_check.sh` が CI (3 OS + sanitize) で全 95 判定 (FDTD 40 +
+幾何音響 55) を実行する。各 `.ofd` の先頭コメントに期待値の導出が書いてある。
 
 ### ofdx_acoustic_fdtd
 
@@ -329,6 +335,8 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 | `ga_panel` | (H) 反射点が板の縁の外に出る受音点では反射が現れない | 有限面の可視性判定 | < 直接音の 5% |
 | `ga_angle` | (I) 局所反応境界の角度依存反射 (cosθ = 0.3505) | R(θ) = (ζcosθ−1)/(ζcosθ+1)、ζ は Paris の式の逆解 | ±1% |
 | `ga_angle` | (I) 角度依存を off にすると R = √(1−α) (既定 = 従来動作) | √0.7 | ±1% |
+| `ga_panel` | (J) 障害物の材質 (α = 0.36): 板反射が √(1−α) 倍、直接音は不変 | √0.64 × 1/(4πr₁) | ±1% |
+| `ga_panel` | (J) 障害物の散乱係数 = 1 で板の鏡面像が消える / 不正な geometry 番号は非零終了 | 像の数 / 異常系 | 完全一致 |
 | `ga_t60` | (C) 10 m 立方体のバンド別 T60 (500 Hz / 4 kHz) | Eyring 式 + 空気吸収 4mV | ±5% |
 | `ga_lossless` | (E) 全 α = 0 + 空気吸収 off でエコーグラムが減衰しない | 無損失 | 窓間 ≤ 0.5 dB |
 | `ga_lossless` | (F) 決定性 (再実行 / スレッド数 1 vs 4) | — | **ビット一致** |

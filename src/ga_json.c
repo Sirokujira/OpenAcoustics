@@ -142,6 +142,21 @@ int ga_write_metadata(ga_t *g)
 	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
 	        g->angle_dep ? "true" : "false");
 	fprintf(fp, "  \"reflecting_surfaces\": %d,\n", g->nsurf);
+	fprintf(fp, "  \"obstacle_materials\": [");
+	{
+		int first = 1, n;
+		for (n = 0; n < g->ngeom; n++) {
+			const ga_geom_t *o = &g->geom[n];
+			if (!o->ok || !o->has_mat) continue;
+			fprintf(fp, "%s\n    { \"geometry\": %d, \"alpha\": ",
+			        first ? "" : ",", n + 1);
+			jput_darray(fp, o->mat_alpha, GA_NBAND);
+			fprintf(fp, ", \"scattering\": %.10g }",
+			        (o->mat_scatter >= 0.0) ? o->mat_scatter : g->scatter);
+			first = 0;
+		}
+		fprintf(fp, "%s],\n", first ? "" : "\n  ");
+	}
 	fprintf(fp, "  \"air\": { \"enabled\": %s, \"temperature_c\": %.10g, "
 	            "\"humidity_percent\": %.10g, \"pressure_kpa\": %.10g, "
 	            "\"attenuation_db_per_m\": ",

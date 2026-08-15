@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 91 判定 (FDTD 40 + 幾何音響 51)。1 本のスクリプトが
+# 検証 : 解析解との比較 95 判定 (FDTD 40 + 幾何音響 55)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**91 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**95 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -193,8 +193,10 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 - 幾何音響の拡張は `.ofdx` の `acoustic.ga` に足す (未知キー無視を保つ)。
   FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
   両ソルバーで共有できる。**この性質を壊さないこと**。
-- 幾何音響で未対応のもの (非直方体の室・障害物ごとの材質/散乱係数・バンド別
-  散乱係数・回折・複数音源) は ReadMe の「幾何音響の制約」に書いてある。
+- 幾何音響で未対応のもの (非直方体の室・バンド別散乱係数・回折・複数音源)
+  は ReadMe の「幾何音響の制約」に書いてある。障害物の材質は
+  `.ofdx` の `acoustic.ga.obstacles[]` で対応済み (既定は剛体 — FDTD 側は
+  常に剛体なので、指定すると高域のみ材質が効く点は ReadMe に明記)。
   実装したら制約表からも消すこと。逆に、原理的に無理なもの (回折、
   Schroeder 周波数より下) を「対応した」と書かないこと。
 - 未実装を実装済みと偽らない: 対応できない入力 (AABB 近似・複数 feed・

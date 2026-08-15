@@ -303,6 +303,98 @@ static int parse_receivers(ga_t *g, js_t *j)
 	}
 }
 
+/* ── acoustic.ga.obstacles : 障害物ごとの材質 ────────────────────
+ * [ { geometry, alpha[6], scattering, enabled }, ... ]
+ *   geometry   : .ofd の geometry 行の番号 (1 起点 — solver.log の
+ *                "geometry #N" と同じ)。存在しない番号は非零終了
+ *                (黙って無視すると「静かに狂う」)。
+ *   alpha[]    : バンド別吸音率 (吸音表と同じ 125 Hz〜 の並び、
+ *                足りないバンドは最後の値で外挿)。省略 = 剛体のまま。
+ *   scattering : 面ごとの散乱係数。省略 = 室の既定 (acoustic.ga.scattering)。
+ * 未知キーは無視 (前方互換)。同じ geometry の行が複数なら最初を使う。 */
+static int parse_obstacle_row(ga_t *g, js_t *j)
+{
+	char key[64];
+	double a[GA_NBAND], v;
+	double scat = -1.0;
+	int acount = 0, idx = 0, enabled = 1, b;
+
+	for (b = 0; b < GA_NBAND; b++) a[b] = 0.0;
+	if (jexpect(j, '{')) return 1;
+	if (jpeek(j) == '}') { j->s++; return 0; }
+	for (;;) {
+		if (jstring(j, key, sizeof(key))) return 1;
+		if (jexpect(j, ':')) return 1;
+		if (!strcmp(key, "enabled")) {
+			if (jbool(j, &enabled)) return 1;
+		}
+		else if (!strcmp(key, "geometry")) {
+			if (jnumber(j, &v)) return 1;
+			idx = (int)v;
+		}
+		else if (!strcmp(key, "alpha")) {
+			if (jexpect(j, '[')) return 1;
+			if (jpeek(j) == ']') { j->s++; }
+			else {
+				for (;;) {
+					if (jnumber(j, &v)) return 1;
+					if (v < 0.0) v = 0.0;
+					if (v > 1.0) v = 1.0;
+					if (acount < GA_NBAND) a[acount] = v;
+					acount++;
+					if (jpeek(j) == ',') { j->s++; continue; }
+					break;
+				}
+				if (jexpect(j, ']')) return 1;
+			}
+		}
+		else if (!strcmp(key, "scattering")) {
+			if (jnumber(j, &v)) return 1;
+			if (v < 0.0 || v > 1.0) {
+				ga_err(g, ".ofdx acoustic.ga.obstacles: scattering = %g is "
+				       "out of range (0 = specular only .. 1 = fully diffuse)",
+				       v);
+				return 1;
+			}
+			scat = v;
+		}
+		else {
+			if (jskip(j)) return 1;   /* name / 未知キー */
+		}
+		if (jpeek(j) == ',') { j->s++; continue; }
+		if (jexpect(j, '}')) return 1;
+		break;
+	}
+	if (!enabled) return 0;
+	if (idx < 1 || idx > g->ngeom) {
+		ga_err(g, ".ofdx acoustic.ga.obstacles: geometry = %d does not match "
+		       "any geometry line in the .ofd (it has %d — the index is "
+		       "1-based, same as \"geometry #N\" in solver.log)",
+		       idx, g->ngeom);
+		return 1;
+	}
+	{
+		ga_geom_t *o = &g->geom[idx - 1];
+		if (o->has_mat) {
+			ga_log(g, "warning: .ofdx acoustic.ga.obstacles has multiple rows "
+			       "for geometry #%d — using the first", idx);
+			return 0;
+		}
+		o->has_mat = 1;
+		for (b = 0; b < GA_NBAND; b++)
+			o->mat_alpha[b] = (acount <= 0) ? 0.0
+			                : (b < acount) ? a[b] : a[acount - 1];
+		o->mat_scatter = scat;
+		ga_log(g, ".ofdx: obstacle #%d material -> alpha = "
+		       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g], scattering = %s",
+		       idx, o->mat_alpha[0], o->mat_alpha[1], o->mat_alpha[2],
+		       o->mat_alpha[3], o->mat_alpha[4], o->mat_alpha[5],
+		       o->mat_alpha[6],
+		       (scat >= 0.0) ? "(per-obstacle)" : "(room default)");
+	}
+	return 0;
+}
+
 /* ── acoustic.ga (幾何音響ソルバー固有の設定) ───────────────────── */
 
 static int parse_ga(ga_t *g, js_t *j)
@@ -378,6 +470,18 @@ static int parse_ga(ga_t *g, js_t *j)
 			 * 従来どおり入射角によらず R = sqrt(1-alpha) (後方互換)。 */
 			if (jbool(j, &bv)) return 1;
 			g->angle_dep = bv;
+		}
+		else if (!strcmp(key, "obstacles")) {
+			if (jexpect(j, '[')) return 1;
+			if (jpeek(j) == ']') { j->s++; }
+			else {
+				for (;;) {
+					if (parse_obstacle_row(g, j)) return 1;
+					if (jpeek(j) == ',') { j->s++; continue; }
+					break;
+				}
+				if (jexpect(j, ']')) return 1;
+			}
 		}
 		else if (!strcmp(key, "receiver_radius_m")) {
 			if (jnumber(j, &v)) return 1;
