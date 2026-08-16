@@ -26,6 +26,12 @@
 #define AC_TMAX          3.0
 #define AC_SABINE_COEF   0.161      /* T_Sabine = 0.161 V/A */
 
+/* 音源ごとのゲイン・遅延 (.ofdx acoustic.sources[] — ADR-0010 Decision 7)
+ * の値域。範囲外は既定値に落とさず非零終了する (数値を捏造しない)。
+ * 幾何音響側 (ga.h) と同じ値 — 両ソルバーで対称。 */
+#define AC_GAIN_MAX   1000.0        /* |gain| の上限 (負は極性反転) */
+#define AC_DELAY_MAX  1.0           /* delay_s の上限 [s] (下限は 0) */
+
 #define AC_PATH_MAX  4096
 #define AC_NAME_MAX  64
 #define AC_PI        3.14159265358979323846
@@ -98,6 +104,12 @@ typedef struct {
 	int    isrc, jsrc, ksrc;           /* feed #1 のセル (metadata 用) */
 	int    nsrc;                       /* 使用する音源数 (= multi ? nfeed : 1) */
 	int   *srccell;                    /* 使用音源のセル (i,j,k の 3 * nsrc) */
+	/* 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) : .ofdx acoustic.sources[]。
+	 * feed 順に nfeed 要素 (省略は gain = 1 / delay = 0 = 従来動作)。
+	 * feed i には gain_i * s(t - delay_i) を注入する (s は共通パルス)。
+	 * NULL のままなら全既定値 (setup が既定値で確保する)。 */
+	double *srcgain;                   /* nfeed 要素 (既定 1) */
+	double *srcdelay;                  /* nfeed 要素 [s] (既定 0) */
 
 	/* 境界係数 (半陰的局所インピーダンス更新 v+ = wA v- ± wB p) */
 	int    wrigid[AC_NWALL];  /* 1 = 剛壁 (更新しない) */

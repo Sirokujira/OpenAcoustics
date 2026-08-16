@@ -218,6 +218,34 @@ int ac_setup(ac_t *ac)
 	tsolve = (ac->tsab > 0.0) ? 1.5 * ac->tsab : AC_TMAX;
 	if (tsolve < AC_TMIN) tsolve = AC_TMIN;
 	if (tsolve > AC_TMAX) tsolve = AC_TMAX;
+
+	/* ── 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) ──
+	 * .ofdx acoustic.sources[] が無ければ既定値 (gain = 1, delay = 0) で
+	 * 確保する — 以降は常に配列越しに参照でき、既定値なら従来動作と
+	 * ビット単位で一致する (1.0 * s(t - 0.0) は s(t) と IEEE で等価)。
+	 * 発火する音源集合の max(delay) だけ計算時間を延長する (遅延で残響が
+	 * 窓の外にこぼれない)。 */
+	if (!ac->srcgain) {
+		ac->srcgain  = (double *)malloc((size_t)(ac->nfeed > 0 ? ac->nfeed : 1)
+		                                * sizeof(double));
+		ac->srcdelay = (double *)calloc((size_t)(ac->nfeed > 0 ? ac->nfeed : 1),
+		                                sizeof(double));
+		if (!ac->srcgain || !ac->srcdelay) {
+			ac_err(ac, "out of memory (%d source gains)", ac->nfeed);
+			return 1;
+		}
+		for (n = 0; n < ac->nfeed; n++) ac->srcgain[n] = 1.0;
+	}
+	{
+		double dmax = 0.0;
+		int nact = (ac->multi_source && ac->nfeed > 0) ? ac->nfeed : 1;
+		for (n = 0; n < nact && n < ac->nfeed; n++)
+			if (ac->srcdelay[n] > dmax) dmax = ac->srcdelay[n];
+		if (dmax > 0.0)
+			ac_log(ac, "duration: extended by max source delay %.4g s "
+			       "(.ofdx acoustic.sources)", dmax);
+		tsolve += dmax;
+	}
 	ac->nsteps = (int)ceil(tsolve * ac->fs);
 	ac->duration = ac->nsteps * ac->dt;
 
@@ -384,10 +412,12 @@ int ac_setup(ac_t *ac)
 		ac->srccell[3 * n + 2] = ks;
 		if (n == 0) { ac->isrc = is; ac->jsrc = js; ac->ksrc = ks; }
 		ac_log(ac, "source #%d: (%.6g, %.6g, %.6g) m -> cell (%d, %d, %d), "
-		       "center (%.6g, %.6g, %.6g) m", n + 1, sx, sy, sz, is, js, ks,
+		       "center (%.6g, %.6g, %.6g) m, gain = %.4g, delay = %.4g s",
+		       n + 1, sx, sy, sz, is, js, ks,
 		       ac->x0 + (is + 0.5) * ac->dx,
 		       ac->y0 + (js + 0.5) * ac->dx,
-		       ac->z0 + (ks + 0.5) * ac->dx);
+		       ac->z0 + (ks + 0.5) * ac->dx,
+		       ac->srcgain[n], ac->srcdelay[n]);
 	}
 	for (n = 0; n < ac->nrecv; n++) {
 		ac_recv_t *r = &ac->recv[n];
@@ -562,15 +592,19 @@ int ac_run(ac_t *ac)
 			}
 		}
 
-		/* ── ソフト音源 (直列)。multi_source なら全音源セルへ同一パルス —
-		 * 離散更新は線形なので、結果は各音源単独の RIR の厳密な和 ── */
+		/* ── ソフト音源 (直列)。multi_source なら全音源セルへ同一波形の
+		 * パルス — 離散更新は線形なので、結果は各音源単独の RIR の厳密な和。
+		 * 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) は gain * s(t - delay)
+		 * (既定 gain = 1 / delay = 0 は従来とビット等価)。 ── */
 		{
-			const double sp = src_pulse(ac, (n + 1) * ac->dt);
+			const double t = (n + 1) * ac->dt;
 			int si2;
 			for (si2 = 0; si2 < ac->nsrc; si2++)
 				p[((size_t)ac->srccell[3 * si2 + 2] * ny
 				   + ac->srccell[3 * si2 + 1]) * nx
-				  + ac->srccell[3 * si2 + 0]] += sp;
+				  + ac->srccell[3 * si2 + 0]] +=
+					ac->srcgain[si2]
+					* src_pulse(ac, t - ac->srcdelay[si2]);
 		}
 
 		/* ── 受音点記録 (サンプル n の時刻は (n+1)·dt — 1 サンプル未満の
@@ -599,6 +633,8 @@ void ac_free(ac_t *ac)
 	free(ac->geom);  ac->geom = NULL;
 	free(ac->feedpos); ac->feedpos = NULL;
 	free(ac->srccell); ac->srccell = NULL;
+	free(ac->srcgain); ac->srcgain = NULL;
+	free(ac->srcdelay); ac->srcdelay = NULL;
 	free(ac->recv);  ac->recv = NULL;
 	free(ac->freq1); ac->freq1 = NULL;
 	free(ac->p);     ac->p = NULL;

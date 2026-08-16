@@ -132,6 +132,8 @@ typedef struct {
 	double *band;
 	double  recv[3];
 	double  src[3];
+	double  sgain;     /* 音源のゲイン (振幅に掛かる — ADR-0010 Decision 7) */
+	double  sdelay;    /* 音源の発火時刻 [s] (到達は sdelay + r/c) */
 	long    nodes;
 	int     truncated;
 	double *seen;      /* 重複除去 : 1 像あたり x, y, z, depth の 4 要素 */
@@ -188,7 +190,7 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 	u[2] = c->recv[2] - I[2];
 	r = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
 	if (r < 1e-9) return;
-	if (r / GA_C0 >= g->duration) return;
+	if (c->sdelay + r / GA_C0 >= g->duration) return;
 	u[0] /= r; u[1] /= r; u[2] /= r;
 
 	/* 逆追跡 : 受音点 -> 最後の反射面 -> ... -> 音源。反射点が有限矩形の
@@ -231,8 +233,8 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 		}
 	}
 
-	/* 振幅 : 距離減衰・面ごとの反射係数と散乱・空気吸収 */
-	gain = 1.0 / (4.0 * GA_PI * r);
+	/* 振幅 : 音源ゲイン・距離減衰・面ごとの反射係数と散乱・空気吸収 */
+	gain = c->sgain / (4.0 * GA_PI * r);
 	for (k = 0; k < depth; k++) {
 		const ga_surf_t *s = &g->surf[seq[k]];
 		ct[k] = fabs(u[s->axis]);
@@ -248,7 +250,7 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 	for (b = 0; b < GA_NBAND; b++)
 		if (fabs(amp[b]) > 1e-300) break;
 	if (b >= GA_NBAND) return;
-	ga_deposit(g, c->band, r / GA_C0, amp);
+	ga_deposit(g, c->band, c->sdelay + r / GA_C0, amp);
 	rv->nimage++;
 }
 
@@ -287,6 +289,8 @@ int ga_images(ga_t *g, int ri, int si, double *band)
 	c.src[0] = g->feedpos[3 * si + 0];
 	c.src[1] = g->feedpos[3 * si + 1];
 	c.src[2] = g->feedpos[3 * si + 2];
+	c.sgain  = g->srcgain[si];
+	c.sdelay = g->srcdelay[si];
 	chain[0][0] = c.src[0]; chain[0][1] = c.src[1]; chain[0][2] = c.src[2];
 
 	/* nimage/nblocked は加算のみ (リセットとまとめログは ga_synth —
@@ -413,8 +417,6 @@ static double obstacle_entry(const ga_t *g, const double p[3], const double d[3]
 int ga_rays(ga_t *g)
 {
 	const double golden = GA_PI * (3.0 - sqrt(5.0));
-	const double smax = GA_C0 * g->duration;
-	const double einit = 1.0 / (double)g->nrays;   /* 音源 1 個あたり強度 1 */
 	const long total = (long)g->nsrc * g->nrays;
 	double lo[3], hi[3];
 	int i, sidx, prog = 0;
@@ -429,9 +431,18 @@ int ga_rays(ga_t *g)
 	fflush(stdout);
 
 	for (sidx = 0; sidx < g->nsrc; sidx++) {
+	/* 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) :
+	 *   - エネルギーは gain^2 重み (後期残響はエネルギー加算なので)
+	 *   - レイの時間予算は duration - delay (検出時刻は delay + 経路長/c)
+	 * 既定 (gain = 1, delay = 0) は従来とビット等価。 */
+	const double sdelay = g->srcdelay[sidx];
+	const double sgain2 = g->srcgain[sidx] * g->srcgain[sidx];
+	const double smax   = GA_C0 * (g->duration - sdelay);
+	const double einit  = sgain2 / (double)g->nrays;
 	/* 音源ごとに決定的ハッシュ列を先頭から使う : 単一音源の既定動作と
 	 * 一致し、multi_source の各音源も単独実行と同じ列になる */
 	g->qidx = 0;
+	if (smax <= 0.0 || einit <= 0.0) continue;   /* 窓外 / gain = 0 は寄与なし */
 	for (i = 0; i < g->nrays; i++) {
 		double p[3], d[3], w[GA_NBAND];
 		double z, rxy, phi, s = 0.0;
@@ -481,7 +492,7 @@ int ga_rays(ga_t *g)
 					if (dist2 >= rad * rad) continue;
 					{
 						double sd = s + tc;
-						int bin = (int)((sd / GA_C0) / GA_BIN_S);
+						int bin = (int)((sdelay + sd / GA_C0) / GA_BIN_S);
 						double *e;
 						if (bin < 0 || bin >= g->nbins) continue;
 						e = g->echo + (((size_t)r * g->nbins) + bin) * GA_NBAND;

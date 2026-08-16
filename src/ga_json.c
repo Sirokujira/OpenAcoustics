@@ -98,15 +98,18 @@ int ga_write_metadata(ga_t *g)
 	            "1/(4*pi*r); the sample sum of an arrival is its amplitude\",\n");
 	fprintf(fp, "  \"time_origin\": \"source firing (direct sound at t = r/c)\",\n");
 	/* 複数音源の契約 (ADR-0010) : source は feed #1 のまま (互換)、使用した
-	 * 全音源は sources に列挙する。multi_source が false なら 1 個。 */
+	 * 全音源は sources に列挙する。multi_source が false なら 1 個。
+	 * gain / delay_s (Decision 7) はキー追加のみ (既定 1 / 0)。 */
 	fprintf(fp, "  \"multi_source\": %s,\n", g->multi_source ? "true" : "false");
 	fprintf(fp, "  \"sources\": [\n");
 	{
 		int n2;
 		for (n2 = 0; n2 < g->nsrc; n2++)
-			fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g] }%s\n",
+			fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g], "
+			        "\"gain\": %.10g, \"delay_s\": %.10g }%s\n",
 			        g->feedpos[3 * n2 + 0], g->feedpos[3 * n2 + 1],
-			        g->feedpos[3 * n2 + 2], (n2 + 1 < g->nsrc) ? "," : "");
+			        g->feedpos[3 * n2 + 2], g->srcgain[n2], g->srcdelay[n2],
+			        (n2 + 1 < g->nsrc) ? "," : "");
 	}
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"source\": {\n");
