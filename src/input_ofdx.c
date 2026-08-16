@@ -276,8 +276,85 @@ static int parse_receivers(ac_t *ac, js_t *j)
 	}
 }
 
-/* root.acoustic の中身 (読むのは absorption / receivers / multi_source のみ、
- * 他は読み飛ばす) */
+/* ── acoustic.sources : 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) ──
+ * [ { gain, delay_s }, ... ] — 並びは .ofd の feed 行の順 (entry #1 =
+ * feed #1)。行・キーの省略は既定値 gain = 1 / delay_s = 0 (従来動作)。
+ * feed 数を超える行は warning + 無視。範囲外 (|gain| > 1000、delay_s < 0
+ * または > 1 s) は既定値に落とさず非零終了する (数値を捏造しない)。
+ * 幾何音響側 (ga_ofdx.c) と対称に実装する。 */
+static int parse_sources(ac_t *ac, js_t *j)
+{
+	int idx = 0, warned = 0, b;
+	if (!ac->srcgain) {
+		ac->srcgain  = (double *)malloc((size_t)(ac->nfeed > 0 ? ac->nfeed : 1)
+		                                * sizeof(double));
+		ac->srcdelay = (double *)calloc((size_t)(ac->nfeed > 0 ? ac->nfeed : 1),
+		                                sizeof(double));
+		if (!ac->srcgain || !ac->srcdelay) {
+			ac_err(ac, "out of memory (acoustic.sources, %d feeds)", ac->nfeed);
+			return 1;
+		}
+		for (b = 0; b < ac->nfeed; b++) ac->srcgain[b] = 1.0;
+	}
+	if (jexpect(j, '[')) return 1;
+	if (jpeek(j) == ']') { j->s++; return 0; }
+	for (;;) {
+		char key[64];
+		double gain = 1.0, delay = 0.0, v;
+		if (jexpect(j, '{')) return 1;
+		if (jpeek(j) == '}') { j->s++; }
+		else {
+			for (;;) {
+				if (jstring(j, key, sizeof(key))) return 1;
+				if (jexpect(j, ':')) return 1;
+				if (!strcmp(key, "gain")) {
+					if (jnumber(j, &v)) return 1;
+					if (!(v >= -AC_GAIN_MAX && v <= AC_GAIN_MAX)) {
+						ac_err(ac, ".ofdx acoustic.sources[%d].gain = %g is out "
+						       "of range (|gain| <= %g; negative = polarity "
+						       "inversion)", idx + 1, v, AC_GAIN_MAX);
+						return 1;
+					}
+					gain = v;
+				}
+				else if (!strcmp(key, "delay_s")) {
+					if (jnumber(j, &v)) return 1;
+					if (!(v >= 0.0 && v <= AC_DELAY_MAX)) {
+						ac_err(ac, ".ofdx acoustic.sources[%d].delay_s = %g is "
+						       "out of range (0 .. %g s; t = 0 is the common "
+						       "time origin — delays cannot be negative)",
+						       idx + 1, v, AC_DELAY_MAX);
+						return 1;
+					}
+					delay = v;
+				}
+				else {
+					if (jskip(j)) return 1;   /* 未知キー (前方互換) */
+				}
+				if (jpeek(j) == ',') { j->s++; continue; }
+				if (jexpect(j, '}')) return 1;
+				break;
+			}
+		}
+		if (idx < ac->nfeed) {
+			ac->srcgain[idx]  = gain;
+			ac->srcdelay[idx] = delay;
+			ac_log(ac, ".ofdx: source #%d -> gain = %.4g, delay = %.4g s",
+			       idx + 1, gain, delay);
+		}
+		else if (!warned) {
+			ac_log(ac, "warning: .ofdx acoustic.sources has more entries than "
+			       "the .ofd has feeds (%d) — extra entries ignored", ac->nfeed);
+			warned = 1;
+		}
+		idx++;
+		if (jpeek(j) == ',') { j->s++; continue; }
+		return jexpect(j, ']');
+	}
+}
+
+/* root.acoustic の中身 (読むのは absorption / receivers / multi_source /
+ * sources のみ、他は読み飛ばす) */
 static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
@@ -289,6 +366,11 @@ static int walk_acoustic(ac_t *ac, js_t *j)
 		if (jexpect(j, ':')) return 1;
 		if (!strcmp(key, "absorption")) {
 			if (parse_absorption(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "sources")) {
+			/* 音源ごとのゲイン・遅延 (ADR-0010 Decision 7)。multi_source と
+			 * 同じく acoustic 直下 — 幾何音響側も同じキーを読む (対称)。 */
+			if (parse_sources(ac, j)) return 1;
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(ac, j)) return 1;

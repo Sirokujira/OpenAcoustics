@@ -59,6 +59,12 @@
 #define GA_HUMID_DEFAULT      50.0
 #define GA_PRESS_KPA_DEFAULT  101.325
 
+/* 音源ごとのゲイン・遅延 (.ofdx acoustic.sources[] — ADR-0010 Decision 7)
+ * の値域。範囲外は既定値に落とさず非零終了する (数値を捏造しない)。
+ * FDTD 側 (acoustic.h) と同じ値 — 両ソルバーで対称。 */
+#define GA_GAIN_MAX   1000.0   /* |gain| の上限 (負は極性反転) */
+#define GA_DELAY_MAX  1.0      /* delay_s の上限 [s] (下限は 0) */
+
 #define GA_PATH_MAX  4096
 #define GA_NAME_MAX  64
 #define GA_PI        3.14159265358979323846
@@ -159,6 +165,13 @@ typedef struct {
 	 * 整合 (ADR-0008) は両ソルバーが同じ音源集合を使う前提)。 */
 	int    multi_source;
 	int    nsrc;                         /* 使用する音源数 (= multi ? nfeed : 1) */
+	/* 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) : .ofdx acoustic.sources[]。
+	 * feed 順に nfeed 要素 (省略は gain = 1 / delay = 0 = 従来動作)。
+	 * 音源 i は t = srcdelay[i] に強度 srcgain[i] で発火する。
+	 * NULL のままなら全既定値 (setup が既定値で確保する)。 */
+	double *srcgain;                     /* nfeed 要素 (既定 1) */
+	double *srcdelay;                    /* nfeed 要素 [s] (既定 0) */
+	double  delay_max;                   /* 発火する音源集合の max(delay) */
 	double scatter;                      /* 拡散反射の割合 (0..1、既定値) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
 	long   qidx;                         /* 決定的ハッシュ列の位置 */

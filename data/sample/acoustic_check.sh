@@ -13,6 +13,9 @@
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
 #  (h) 複数音源 (multi_source) : 2 feed の同時発火が各 feed 単独の和に一致
 #      (離散更新の線形性、L2 相対 1e-5)
+#  (h2) 音源ごとのゲイン・遅延 (acoustic.sources) : gain = 0.5 の RIR が
+#      gain = 1 のビット等価な 0.5 倍 (2 の冪は丸めと可換)、delay = 5 ms で
+#      ピークが 5 ms 移動、ゲイン・遅延つき重ね合わせの線形性、範囲外は非零終了
 #
 # ── ofdx_acoustic_ga (高域担当、幾何音響) の判定 :
 #  (A) 自由音場 : 直接音の時刻 t = r/c と振幅 1/(4 pi r) が ±1%
@@ -30,6 +33,8 @@
 #      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
 #  (K) 複数音源 (multi_source) : 2 音源の直接音がそれぞれ 1/(4 pi r_i) ±1%、
 #      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
+#  (K2) 音源ごとのゲイン・遅延 (acoustic.sources) : 直接音がそれぞれ
+#      gain_i/(4 pi r_i)・t = delay_i + r_i/c ±1%、範囲外は非零終了
 #
 # WAV の読みは od -t f4 (float32 リトルエンディアン)。CI の 3 OS
 # (Linux / macOS / Windows Git Bash) はいずれもリトルエンディアンかつ
@@ -351,10 +356,86 @@ if [ "$sup_ok" = "1" ]; then
 		}' || status=1
 	grep -q '"multi_source": true' "$WORK/super_ab/metadata.json" \
 		&& say_ok "fdtd multi_source metadata" || say_ng "fdtd multi_source metadata"
-	grep -Fq '{ "pos_m": [3.15, 2.35, 1.95] }' "$WORK/super_ab/metadata.json" \
+	grep -Fq '"pos_m": [3.15, 2.35, 1.95]' "$WORK/super_ab/metadata.json" \
 		&& say_ok "fdtd sources listed" || say_ng "fdtd sources listed"
 else
 	say_ng "fdtd superposition" " (solver failed)"
+fi
+
+echo "--- (h2) per-source gain/delay (.ofdx acoustic.sources, ADR-0010 Decision 7)"
+# ゲイン 0.5 は 2 の冪なので IEEE の丸めと厳密に可換 : gain = 0.5 の RIR は
+# gain = 1 の RIR の**ビット等価な** 0.5 倍 (期待値はコードと独立な IEEE 754
+# の性質)。遅延 5 ms はパルス中心の移動そのもの (|p| ピークが 5 ms 動く)。
+# 重ね合わせは (h) と同じ線形性。導出は super2.ofd の先頭コメント参照。
+for v in gab ga gb; do rm -rf "$WORK/super_$v"; mkdir -p "$WORK/super_$v"; done
+mk_sources() {   # mk_sources <入> <出> <sources 配列> : multi_source 行に併記
+	# (BSD sed は置換文字列の \n を解さないので 1 行に足す)
+	sed "s/\"multi_source\": true,/\"multi_source\": true, \"sources\": $3,/" \
+		"$1" > "$2"
+}
+cp "$SRC/super2.ofd" "$WORK/super_gab/"
+mk_sources "$SRC/super2.ofdx" "$WORK/super_gab/super2.ofdx" \
+	'[ { "gain": 0.5 }, { "gain": 2.0, "delay_s": 0.005 } ]'
+grep -v "^feed = z 3.15" "$SRC/super2.ofd" > "$WORK/super_ga/super2.ofd"
+# feed 数 (1) を超える 2 行目は warning + 無視 (結果は entry #1 のみで決まる)
+mk_sources "$SRC/super2.ofdx" "$WORK/super_ga/super2.ofdx" \
+	'[ { "gain": 0.5 }, { "gain": 2.0, "delay_s": 0.005 } ]'
+grep -v "^feed = z 0.55" "$SRC/super2.ofd" > "$WORK/super_gb/super2.ofd"
+mk_sources "$SRC/super2.ofdx" "$WORK/super_gb/super2.ofdx" \
+	'[ { "gain": 2.0, "delay_s": 0.005 } ]'
+sup_ok=1
+for v in gab ga gb; do
+	"$SOLVER" "$WORK/super_$v" > /dev/null 2>&1 || sup_ok=0
+done
+if [ "$sup_ok" = "1" ]; then
+	for v in gab ga gb; do dump "$WORK/super_$v/rir.wav" > "$WORK/super_$v/rir.txt"; done
+	# gain = 0.5 の RIR は (h) の feed #1 単独 RIR のちょうど 0.5 倍。
+	# 算術上はビット等価 (2 の冪は丸めと可換) だが、od の 10 進ダンプが
+	# float32 を約 7 桁に丸めるので、テキスト経由の観測限界は ~1e-7/標本。
+	# 実測 ~2e-8。許容 1e-6 は表示丸めの上・float32 量子化 (~6e-8) の桁。
+	paste "$WORK/super_ga/rir.txt" "$WORK/super_a/rir.txt" | awk -F'\t' \
+		'{ dd = ($1 + 0) - 0.5 * ($2 + 0); e2 += dd * dd; r2 += ($1 + 0) * ($1 + 0) }
+		END {
+			rel = (r2 > 0) ? sqrt(e2 / r2) : 1;
+			printf "%-26s L2 rel err=%.3e -> %s (<= 1e-6)\n", "fdtd gain=0.5 scaling", rel, (rel <= 1e-6) ? "OK" : "NG";
+			exit (rel <= 1e-6) ? 0 : 1
+		}' || status=1
+	# 遅延 5 ms : feed #2 単独 (h) と比べ |p| ピークが 5 ms 移動する
+	ib=$(awk '{ a = ($1 < 0) ? -$1 : $1; if (a > pk) { pk = a; nb = NR } } END { print nb }' "$WORK/super_b/rir.txt")
+	ig=$(awk '{ a = ($1 < 0) ? -$1 : $1; if (a > pk) { pk = a; nb = NR } } END { print nb }' "$WORK/super_gb/rir.txt")
+	fs_sup=$(awk 'BEGIN{x=343*sqrt(3)/(0.99*0.1); f=int(x); if (f<x) f++; print f}')
+	chkabs "fdtd delay peak shift" \
+		"$(awk -v a="$ib" -v b="$ig" -v fs="$fs_sup" 'BEGIN{printf "%.6f", (b-a)/fs}')" \
+		0.005 "$(awk -v fs="$fs_sup" 'BEGIN{printf "%.6f", 2/fs}')" s
+	# ゲイン・遅延つきの重ね合わせも線形 (長さが違うぶんは 0 詰め)
+	paste "$WORK/super_gab/rir.txt" "$WORK/super_ga/rir.txt" "$WORK/super_gb/rir.txt" | awk -F'\t' \
+		'{ dd = ($1 + 0) - (($2 + 0) + ($3 + 0)); e2 += dd * dd; r2 += ($1 + 0) * ($1 + 0) }
+		END {
+			rel = sqrt(e2 / r2);
+			printf "%-26s L2 rel err=%.3e -> %s (<= 1e-5)\n", "fdtd gain/delay superpos", rel, (rel <= 1e-5) ? "OK" : "NG";
+			exit (rel <= 1e-5) ? 0 : 1
+		}' || status=1
+	grep -Fq '"gain": 2' "$WORK/super_gab/metadata.json" \
+		&& say_ok "fdtd sources gain listed" || say_ng "fdtd sources gain listed"
+	grep -Fq '"delay_s": 0.005' "$WORK/super_gab/metadata.json" \
+		&& say_ok "fdtd sources delay listed" || say_ng "fdtd sources delay listed"
+	grep -q "warning: .ofdx acoustic.sources has more entries" \
+		"$WORK/super_ga/solver.log" \
+		&& say_ok "fdtd extra sources warning" || say_ng "fdtd extra sources warning"
+else
+	say_ng "fdtd gain/delay superpos" " (solver failed)"
+fi
+# 範囲外の delay_s は既定値に落とさず非零終了 (数値を捏造しない)
+rm -rf "$WORK/super_badd"; mkdir -p "$WORK/super_badd"
+cp "$SRC/super2.ofd" "$WORK/super_badd/"
+mk_sources "$SRC/super2.ofdx" "$WORK/super_badd/super2.ofdx" '[ { "delay_s": 5 } ]'
+if "$SOLVER" "$WORK/super_badd" > /dev/null 2> "$WORK/super_badd/stderr.log"; then
+	say_ng "fdtd bad delay_s exit" " (should fail)"
+elif grep -qi "delay_s" "$WORK/super_badd/stderr.log" && \
+     [ ! -f "$WORK/super_badd/rir.wav" ]; then
+	printf "%-26s -> OK (refused with the offending key)\n" "fdtd bad delay_s exit"
+else
+	say_ng "fdtd bad delay_s exit" " (no reason in stderr)"
 fi
 
 ###############################################################################
@@ -712,7 +793,7 @@ ga_run ga_two ga_two.ofd ga_two.ofdx && {
 	done
 	grep -q '"multi_source": true' "$d/metadata.json" \
 		&& say_ok "ga multi_source metadata" || say_ng "ga multi_source metadata"
-	grep -Fq '{ "pos_m": [35, 10, 10] }' "$d/metadata.json" \
+	grep -Fq '"pos_m": [35, 10, 10]' "$d/metadata.json" \
 		&& say_ok "ga sources listed" || say_ng "ga sources listed"
 }
 # 既定 (multi_source なし) は feed #1 のみ + warning (後方互換)
@@ -742,6 +823,71 @@ elif grep -qi "feed #2" "$WORK/ga_two_out/stderr.log"; then
 	printf "%-26s -> OK (feed #2 を指して拒否)\n" "ga multi-src outside exit"
 else
 	say_ng "ga multi-src outside exit" " (no feed # in stderr)"
+fi
+
+echo "--- (K2) per-source gain/delay (.ofdx acoustic.sources, ADR-0010 Decision 7)"
+# 音源 i は t = delay_i に強度 gain_i で発火する。同じ ga_two の 2 音源に
+# gain 0.5 / 2.0 と delay 0 / 5 ms を与えると、直接音の閉形式が
+#   #1 : A = 0.5/(4 pi 10) = 3.978874e-3、t = 10/343 = 29.15 ms
+#   #2 : A = 2.0/(4 pi 20) = 7.957747e-3、t = 5 ms + 20/343 = 63.31 ms
+# になる (導出は ga_two.ofd の先頭コメント + ゲイン・遅延の定義そのもの)。
+rm -rf "$WORK/ga_two_gd"; mkdir -p "$WORK/ga_two_gd"
+cp "$SRC/ga_two.ofd" "$WORK/ga_two_gd/"
+mk_sources "$SRC/ga_two.ofdx" "$WORK/ga_two_gd/ga_two.ofdx" \
+	'[ { "gain": 0.5 }, { "gain": 2.0, "delay_s": 0.005 } ]'
+if "$GA_SOLVER" "$WORK/ga_two_gd" > /dev/null 2>&1; then
+	d="$WORK/ga_two_gd"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	t1=$(awk 'BEGIN{printf "%.10f", 10.0/343.0}')
+	t2=$(awk 'BEGIN{printf "%.10f", 0.005 + 20.0/343.0}')
+	chk "ga gain #1 amplitude" "$(ga_sum "$d/rir.txt" "$t1" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 0.5/(4*pi*10.0)}')" 0.01
+	chk "ga gain #1 arrival" "$(ga_peak "$d/rir.txt" "$t1" 0.001)" "$t1" 0.01
+	chk "ga gain #2 amplitude" "$(ga_sum "$d/rir.txt" "$t2" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 2.0/(4*pi*20.0)}')" 0.01
+	chk "ga delay #2 arrival" "$(ga_peak "$d/rir.txt" "$t2" 0.001)" "$t2" 0.01
+	grep -Fq '"gain": 2' "$d/metadata.json" \
+		&& say_ok "ga sources gain listed" || say_ng "ga sources gain listed"
+	grep -Fq '"delay_s": 0.005' "$d/metadata.json" \
+		&& say_ok "ga sources delay listed" || say_ng "ga sources delay listed"
+else
+	say_ng "ga gain/delay run" " (solver failed)"
+fi
+# multi_source なしでも entry #1 は feed #1 に効く (発火集合へ一様に適用)
+rm -rf "$WORK/ga_one_gd"; mkdir -p "$WORK/ga_one_gd"
+cp "$SRC/ga_two.ofd" "$WORK/ga_one_gd/"
+sed 's/"multi_source": true,/"sources": [ { "gain": 0.5 } ],/' \
+	"$SRC/ga_two.ofdx" > "$WORK/ga_one_gd/ga_two.ofdx"
+if "$GA_SOLVER" "$WORK/ga_one_gd" > /dev/null 2>&1; then
+	dump "$WORK/ga_one_gd/rir.wav" > "$WORK/ga_one_gd/rir.txt"
+	t1=$(awk 'BEGIN{printf "%.10f", 10.0/343.0}')
+	chk "ga single-src gain" "$(ga_sum "$WORK/ga_one_gd/rir.txt" "$t1" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 0.5/(4*pi*10.0)}')" 0.01
+else
+	say_ng "ga single-src gain" " (solver failed)"
+fi
+# 範囲外は既定値に落とさず非零終了 (数値を捏造しない) : gain と delay_s
+rm -rf "$WORK/ga_badgain"; mkdir -p "$WORK/ga_badgain"
+cp "$SRC/ga_two.ofd" "$WORK/ga_badgain/"
+mk_sources "$SRC/ga_two.ofdx" "$WORK/ga_badgain/ga_two.ofdx" '[ { "gain": 2000 } ]'
+if "$GA_SOLVER" "$WORK/ga_badgain" > /dev/null 2> "$WORK/ga_badgain/stderr.log"; then
+	say_ng "ga bad gain exit" " (should fail)"
+elif grep -qi "gain" "$WORK/ga_badgain/stderr.log" && \
+     [ ! -f "$WORK/ga_badgain/rir.wav" ]; then
+	printf "%-26s -> OK (refused with the offending key)\n" "ga bad gain exit"
+else
+	say_ng "ga bad gain exit" " (no reason in stderr)"
+fi
+rm -rf "$WORK/ga_baddelay"; mkdir -p "$WORK/ga_baddelay"
+cp "$SRC/ga_two.ofd" "$WORK/ga_baddelay/"
+mk_sources "$SRC/ga_two.ofdx" "$WORK/ga_baddelay/ga_two.ofdx" '[ { "delay_s": -0.001 } ]'
+if "$GA_SOLVER" "$WORK/ga_baddelay" > /dev/null 2> "$WORK/ga_baddelay/stderr.log"; then
+	say_ng "ga bad delay_s exit" " (should fail)"
+elif grep -qi "delay_s" "$WORK/ga_baddelay/stderr.log" && \
+     [ ! -f "$WORK/ga_baddelay/rir.wav" ]; then
+	printf "%-26s -> OK (refused with the offending key)\n" "ga bad delay_s exit"
+else
+	say_ng "ga bad delay_s exit" " (no reason in stderr)"
 fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"

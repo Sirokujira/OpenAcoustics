@@ -287,6 +287,25 @@ int ga_setup(ga_t *g)
 		       "rir.wav is the superposition (unit strength each, no 1/N)",
 		       g->nsrc);
 
+	/* ── 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) ──
+	 * .ofdx acoustic.sources[] が無ければ既定値 (gain = 1, delay = 0) で
+	 * 確保する — 以降は常に配列越しに参照でき、既定値なら従来動作と
+	 * 完全一致する (1.0 * x と x - 0.0 は IEEE でビット等価)。 */
+	if (!g->srcgain) {
+		g->srcgain  = (double *)malloc((size_t)(g->nfeed > 0 ? g->nfeed : 1)
+		                               * sizeof(double));
+		g->srcdelay = (double *)calloc((size_t)(g->nfeed > 0 ? g->nfeed : 1),
+		                               sizeof(double));
+		if (!g->srcgain || !g->srcdelay) {
+			ga_err(g, "out of memory (%d source gains)", g->nfeed);
+			return 1;
+		}
+		for (n = 0; n < g->nfeed; n++) g->srcgain[n] = 1.0;
+	}
+	g->delay_max = 0.0;
+	for (si2 = 0; si2 < g->nsrc; si2++)
+		if (g->srcdelay[si2] > g->delay_max) g->delay_max = g->srcdelay[si2];
+
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
 	for (si2 = 0; si2 < g->nsrc; si2++) {
 		double sx = g->feedpos[3 * si2 + 0];
@@ -529,13 +548,26 @@ int ga_setup(ga_t *g)
 		tsolve = g->duration_user;
 		ga_log(g, "duration: %.4g s (forced by .ofdx acoustic.ga.duration_s)",
 		       tsolve);
+		if (tsolve < g->delay_max + rmax / c)
+			ga_log(g, "warning: forced duration %.4g s is shorter than "
+			       "max source delay + longest direct path (%.4g s) — "
+			       "some arrivals will fall outside the RIR",
+			       tsolve, g->delay_max + rmax / c);
 	}
 	else {
 		tsolve = (g->t60max >= 0.0) ? 1.5 * g->t60max : GA_TMAX;
 		if (tsolve < GA_TMIN) tsolve = GA_TMIN;
 		if (tsolve > GA_TMAX) tsolve = GA_TMAX;
+		/* 音源遅延 (ADR-0010 Decision 7) : 最後の発火から数えて T 残すよう
+		 * max(delay) を足す (遅延で残響が窓の外にこぼれない)。delay = 0 なら
+		 * 従来と完全一致。 */
+		tsolve += g->delay_max;
 		/* 直接音が必ず入るようにする (長大な自由空間ケース対策) */
-		if (tsolve < rmax / c + 0.05) tsolve = rmax / c + 0.05;
+		if (tsolve < g->delay_max + rmax / c + 0.05)
+			tsolve = g->delay_max + rmax / c + 0.05;
+		if (g->delay_max > 0.0)
+			ga_log(g, "duration: extended by max source delay %.4g s",
+			       g->delay_max);
 		if (g->t60max >= 0.0)
 			ga_log(g, "duration: max_band T_Eyring = %.4g s "
 			       "(V = %.4g m^3, S = %.4g m^2) -> T = %.4g s",
@@ -600,10 +632,11 @@ int ga_setup(ga_t *g)
 		       rv->x, rv->y, rv->z, rv->radius, rv->file);
 	}
 	for (si2 = 0; si2 < g->nsrc; si2++)
-		ga_log(g, "source #%d: (%.6g, %.6g, %.6g) m%s", si2 + 1,
+		ga_log(g, "source #%d: (%.6g, %.6g, %.6g) m, gain = %.4g, "
+		       "delay = %.4g s%s", si2 + 1,
 		       g->feedpos[3 * si2 + 0], g->feedpos[3 * si2 + 1],
-		       g->feedpos[3 * si2 + 2],
-		       (si2 == 0) ? " (t = 0 は音源発火時刻 — 直接音は t = r/c に立つ)"
+		       g->feedpos[3 * si2 + 2], g->srcgain[si2], g->srcdelay[si2],
+		       (si2 == 0) ? " (発火は t = delay — 直接音は t = delay + r/c)"
 		                  : "");
 
 	/* ── 有効帯域 ── */
