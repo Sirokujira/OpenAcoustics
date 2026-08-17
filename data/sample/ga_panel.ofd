@@ -51,6 +51,15 @@ title = GA check (H): early specular reflection off a rigid obstacle panel
 # 測らないのは、拡散に回った分がほぼ同時刻に戻って判定窓が雑音まみれに
 # なるため (ga_floor の (B2) と同じ理由)。
 #
+# バンド別散乱の変種 (acoustic_check.sh (L)) :
+#   { "geometry": 1, "scattering": [1, 1, 1, 1, 0, 0] } + 空気吸収 off。
+#   s_b = 0 の 2 kHz バンドは板の鏡面反射が完全に残り拡散も混ざらない
+#   (拡散のバンド重み s_b/s_ref = 0) ので、受音点 #1 の RIR の 2 kHz の
+#   DFT は 2 発の閉形式
+#     |X| = sqrt(A0^2 + A1^2 + 2 A0 A1 cos(2 pi f (r1-r0)/c))  (±1%)
+#   になる (導出の詳細は ga_floor.ofd の (L) 参照。ここは obstacles 行の
+#   配列指定という 3 つ目の経路を判定している)。
+#
 # 計算時間 : 室壁 alpha = 1 -> T_Eyring = 0 -> 下限 0.5 s。
 # --------------------------------------------------------------------------
 xmesh = 0.0 40 20.0

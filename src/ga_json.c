@@ -146,14 +146,38 @@ int ga_write_metadata(ga_t *g)
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"image_order\": %d,\n", g->order);
 	fprintf(fp, "  \"rays\": %d,\n", g->nrays);
-	fprintf(fp, "  \"scattering\": %.10g,\n", g->scatter);
+	/* scattering / scattering_walls は互換のため従来どおりスカラー
+	 * (バンド別のときはバンド平均 = 抽選の基準確率)。バンド別の実値は
+	 * 追加キー scattering_bands / scattering_walls_bands に出す。 */
+	{
+		double smean = g->scatter[0];
+		int b2, uni = 1;
+		for (b2 = 0; b2 < GA_NBAND; b2++)
+			if (g->scatter[b2] != g->scatter[0]) uni = 0;
+		if (!uni) {
+			smean = 0.0;
+			for (b2 = 0; b2 < GA_NBAND; b2++) smean += g->scatter[b2];
+			smean /= GA_NBAND;
+		}
+		fprintf(fp, "  \"scattering\": %.10g,\n", smean);
+	}
+	fprintf(fp, "  \"scattering_bands\": ");
+	jput_darray(fp, g->scatter, GA_NBAND);
+	fprintf(fp, ",\n");
 	fprintf(fp, "  \"scattering_walls\": ");
 	{
 		double sw[GA_NWALL];
-		for (w = 0; w < GA_NWALL; w++) sw[w] = g->surf[w].scatter;
+		for (w = 0; w < GA_NWALL; w++) sw[w] = g->surf[w].sref;
 		jput_darray(fp, sw, GA_NWALL);
 	}
 	fprintf(fp, ",\n");
+	fprintf(fp, "  \"scattering_walls_bands\": [\n");
+	for (w = 0; w < GA_NWALL; w++) {
+		fprintf(fp, "    ");
+		jput_darray(fp, g->surf[w].scatter, GA_NBAND);
+		fprintf(fp, "%s\n", (w + 1 < GA_NWALL) ? "," : "");
+	}
+	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
 	        g->angle_dep ? "true" : "false");
 	fprintf(fp, "  \"reflecting_surfaces\": %d,\n", g->nsurf);
@@ -162,12 +186,27 @@ int ga_write_metadata(ga_t *g)
 		int first = 1, n;
 		for (n = 0; n < g->ngeom; n++) {
 			const ga_geom_t *o = &g->geom[n];
+			const double *sc;
+			double smean = 0.0;
+			int b2;
 			if (!o->ok || !o->has_mat) continue;
+			sc = (o->mat_scatter[0] >= 0.0) ? o->mat_scatter : g->scatter;
+			for (b2 = 1; b2 < GA_NBAND; b2++)
+				if (sc[b2] != sc[0]) break;
+			if (b2 >= GA_NBAND) {
+				smean = sc[0];
+			}
+			else {
+				for (b2 = 0; b2 < GA_NBAND; b2++) smean += sc[b2];
+				smean /= GA_NBAND;
+			}
 			fprintf(fp, "%s\n    { \"geometry\": %d, \"alpha\": ",
 			        first ? "" : ",", n + 1);
 			jput_darray(fp, o->mat_alpha, GA_NBAND);
-			fprintf(fp, ", \"scattering\": %.10g }",
-			        (o->mat_scatter >= 0.0) ? o->mat_scatter : g->scatter);
+			fprintf(fp, ", \"scattering\": %.10g, \"scattering_bands\": ",
+			        smean);
+			jput_darray(fp, sc, GA_NBAND);
+			fprintf(fp, " }");
 			first = 0;
 		}
 		fprintf(fp, "%s],\n", first ? "" : "\n  ");

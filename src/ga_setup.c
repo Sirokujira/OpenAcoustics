@@ -402,9 +402,9 @@ int ga_setup(ga_t *g)
 			for (b = 0; b < GA_NBAND; b++) {
 				s->alpha[b] = g->alpha[w][b];
 				s->refl[b]  = g->refl[w][b];
+				s->scatter[b] = (g->wall_scatter[w][0] >= 0.0)
+				              ? g->wall_scatter[w][b] : g->scatter[b];
 			}
-			s->scatter = (g->wall_scatter[w] >= 0.0)
-			           ? g->wall_scatter[w] : g->scatter;
 			s->wall = w;
 			s->geom = -1;
 		}
@@ -436,15 +436,35 @@ int ga_setup(ga_t *g)
 						double a = o->has_mat ? o->mat_alpha[b] : 0.0;
 						s->alpha[b] = a;
 						s->refl[b]  = sqrt(1.0 - a);
+						s->scatter[b] = (o->has_mat && o->mat_scatter[0] >= 0.0)
+						              ? o->mat_scatter[b] : g->scatter[b];
 					}
-					s->scatter = (o->has_mat && o->mat_scatter >= 0.0)
-					           ? o->mat_scatter : g->scatter;
 					s->wall = -1;
 					s->geom = n;
 				}
 			}
 		}
 		g->nsurf = si;
+	}
+
+	/* ── 散乱の抽選の基準確率 sref とバンド一様フラグ ──
+	 * 1 本のレイが全バンドを運ぶため拡散/鏡面の抽選は 1 回しかできない。
+	 * 基準確率 sref (一様なら scatter[0] そのもの、バンド別なら平均) で
+	 * 抽選し、拡散枝はバンドエネルギーに s_b/sref、鏡面枝に
+	 * (1-s_b)/(1-sref) を掛ける (重み付き抽選 — 期待値は各バンドで厳密)。
+	 * 一様なら重みは s/s = 1 (IEEE で厳密) となり従来動作とビット等価。
+	 * バンド別で sref が 0 や 1 になるのは全バンド同値のときだけなので
+	 * (s_b は 0..1)、バンド別の枝で除算が 0 になることはない。 */
+	for (n = 0; n < g->nsurf; n++) {
+		ga_surf_t *s = &g->surf[n];
+		double sum = 0.0;
+		int uni = 1;
+		for (b = 0; b < GA_NBAND; b++) {
+			if (s->scatter[b] != s->scatter[0]) uni = 0;
+			sum += s->scatter[b];
+		}
+		s->suni = uni;
+		s->sref = uni ? s->scatter[0] : sum / GA_NBAND;
 	}
 
 	/* ── 角度依存吸音 (局所反応) 用の規格化インピーダンス ──
@@ -668,14 +688,39 @@ int ga_setup(ga_t *g)
 		return 1;
 	}
 
-	ga_log(g, "scattering coefficient: default %.4g, per wall "
-	       "[x- %.4g, x+ %.4g, y- %.4g, y+ %.4g, z- %.4g, z+ %.4g] "
-	       "(0 = specular only, 1 = fully diffuse Lambert). 鏡像法の像は "
-	       "面ごとの (1-s)^(1/2) を掛けて減じ、抜けた拡散分はレイ側が受け持つ "
-	       "(二重計上なし)", g->scatter,
-	       g->surf[GA_XM].scatter, g->surf[GA_XP].scatter,
-	       g->surf[GA_YM].scatter, g->surf[GA_YP].scatter,
-	       g->surf[GA_ZM].scatter, g->surf[GA_ZP].scatter);
+	{
+		double smean = 0.0;
+		int nonuni = 0;
+		for (b = 0; b < GA_NBAND; b++) smean += g->scatter[b];
+		smean /= GA_NBAND;
+		ga_log(g, "scattering coefficient: default %.4g, per wall "
+		       "[x- %.4g, x+ %.4g, y- %.4g, y+ %.4g, z- %.4g, z+ %.4g] "
+		       "(0 = specular only, 1 = fully diffuse Lambert). 鏡像法の像は "
+		       "面ごと・バンドごとの (1-s_b)^(1/2) を掛けて減じ、抜けた拡散分は "
+		       "レイ側が受け持つ (二重計上なし)", smean,
+		       g->surf[GA_XM].sref, g->surf[GA_XP].sref,
+		       g->surf[GA_YM].sref, g->surf[GA_YP].sref,
+		       g->surf[GA_ZM].sref, g->surf[GA_ZP].sref);
+		for (n = 0; n < g->nsurf; n++) if (!g->surf[n].suni) nonuni = 1;
+		if (nonuni) {
+			ga_log(g, "band-dependent scattering: the diffuse/specular lottery "
+			       "uses the per-surface band mean s_ref once per bounce; band "
+			       "energies are reweighted by s_b/s_ref (diffuse) or "
+			       "(1-s_b)/(1-s_ref) (specular) — exact in expectation per band, "
+			       "so strong band contrast just adds variance (use more rays)");
+			for (w = 0; w < GA_NWALL; w++)
+				if (!g->surf[w].suni)
+					ga_log(g, "wall %s: scattering = "
+					       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g]",
+					       (w == GA_XM) ? "x-" : (w == GA_XP) ? "x+" :
+					       (w == GA_YM) ? "y-" : (w == GA_YP) ? "y+" :
+					       (w == GA_ZM) ? "z-" : "z+",
+					       g->surf[w].scatter[0], g->surf[w].scatter[1],
+					       g->surf[w].scatter[2], g->surf[w].scatter[3],
+					       g->surf[w].scatter[4], g->surf[w].scatter[5],
+					       g->surf[w].scatter[6]);
+		}
+	}
 	ga_log(g, "reflecting surfaces: %d (room 6 + %d obstacle faces)",
 	       g->nsurf, g->nsurf - GA_NWALL);
 	ga_log(g, "geometric acoustics: image order %d, %d rays, "

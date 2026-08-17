@@ -35,6 +35,10 @@
 #      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
 #  (K2) 音源ごとのゲイン・遅延 (acoustic.sources) : 直接音がそれぞれ
 #      gain_i/(4 pi r_i)・t = delay_i + r_i/c ±1%、範囲外は非零終了
+#  (L) バンド別の散乱係数 (scattering の配列指定) : s_b = 0 のバンドの DFT が
+#      閉形式 |A0 e^{-iwt0} + A1 e^{-iwt1}| と ±1% (そのバンドは鏡面が
+#      減らず拡散も混ざらない)、3 つの指定経路 (absorption 行 / 室既定 /
+#      obstacles 行)、範囲外は非零終了
 #
 # WAV の読みは od -t f4 (float32 リトルエンディアン)。CI の 3 OS
 # (Linux / macOS / Windows Git Bash) はいずれもリトルエンディアンかつ
@@ -888,6 +892,124 @@ elif grep -qi "delay_s" "$WORK/ga_baddelay/stderr.log" && \
 	printf "%-26s -> OK (refused with the offending key)\n" "ga bad delay_s exit"
 else
 	say_ng "ga bad delay_s exit" " (no reason in stderr)"
+fi
+
+echo "--- (L) band-dependent scattering (scattering as an array, +-1%)"
+# 散乱係数はバンド別に与えられる (数値 = 全バンド同値は従来どおり)。
+# 抽選は面ごとの基準確率 (バンド平均) で 1 回、バンド別はエネルギーの
+# 重み付けで実現するので、s_b = 0 のバンドは鏡面成分が一切減らず拡散も
+# 一切混ざらない。判定はそのバンドの中心周波数の DFT (バンド重みは単位分割
+# ハットなので中心では他バンドが漏れない) を 2 発の閉形式
+#   |X(f)| = sqrt(A0^2 + A1^2 + 2 A0 A1 cos(2 pi f (r1-r0)/c))
+# と突き合わせる (空気吸収は off、導出は ga_floor.ofd / ga_panel.ofd)。
+# バンド平均に潰す誤実装は 4 kHz で -19%、配列を無視して室既定 0.5 に
+# 落とす誤実装は -13% ずれるので ±1% が鋭い判定になる。
+ga_cf2() {   # ga_cf2 <r0> <r1> <f> : 2 発の DFT 閉形式
+	awk -v r0="$1" -v r1="$2" -v f="$3" -v pi="$PI" 'BEGIN {
+		c = 343.0; A0 = 1/(4*pi*r0); A1 = 1/(4*pi*r1);
+		ph = 2*pi*f*(r1 - r0)/c;
+		printf "%.10e", sqrt(A0*A0 + A1*A1 + 2*A0*A1*cos(ph)) }'
+}
+# (L1) absorption 行の配列 : 床 s = [1,1,1,1,1,0] -> 4 kHz バンドだけ鏡面が残る
+rm -rf "$WORK/ga_bscat"; mkdir -p "$WORK/ga_bscat"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_bscat/"
+cat > "$WORK/ga_bscat/ga_floor.ofdx" <<'EOF'
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 4, "alpha": [0, 0, 0, 0, 0, 0], "scattering": [1, 1, 1, 1, 1, 0] },
+      { "enabled": true, "role": 1, "alpha": [1, 1, 1, 1, 1, 1] },
+      { "enabled": true, "role": 2, "alpha": [1, 1, 1, 1, 1, 1] },
+      { "enabled": true, "role": 3, "alpha": [1, 1, 1, 1, 1, 1] }
+    ],
+    "ga": { "image_order": 2, "rays": 2000, "scattering": 0.5, "air_absorption": false }
+  }
+}
+EOF
+r0f=$(awk 'BEGIN{printf "%.10f", sqrt(32)}')
+r1f=$(awk 'BEGIN{printf "%.10f", sqrt(52)}')
+if "$GA_SOLVER" "$WORK/ga_bscat" > /dev/null 2>&1; then
+	d="$WORK/ga_bscat"
+	dump "$d/rir.wav" > "$d/rir.txt"
+	chk "ga band-scat 4 kHz clean" "$(ga_mag "$d/rir.txt" 4000)" \
+		"$(ga_cf2 "$r0f" "$r1f" 4000)" 0.01
+	grep -q '"image_sources": 2' "$d/metadata.json" \
+		&& say_ok "ga band-scat image kept" || say_ng "ga band-scat image kept" \
+		" (どこかのバンドが s < 1 なら像は残る)"
+	# metadata : 既存キーはバンド平均 (床 = 5/7)、実値は _bands 追加キー
+	if grep -q '"scattering_walls_bands"' "$d/metadata.json" && \
+	   grep -q '0.7142857143' "$d/metadata.json"; then
+		say_ok "ga band-scat metadata"
+	else
+		say_ng "ga band-scat metadata" " (mean + _bands keys expected)"
+	fi
+else
+	say_ng "ga band-scat 4 kHz clean" " (solver failed)"
+fi
+# (L1') 反対側の端 : 床 s = [0,0,0,0,0,1] -> 500 Hz バンドは鏡面が全く減らない
+rm -rf "$WORK/ga_bscat_lo"; mkdir -p "$WORK/ga_bscat_lo"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_bscat_lo/"
+sed 's/"scattering": \[1, 1, 1, 1, 1, 0\]/"scattering": [0, 0, 0, 0, 0, 1]/' \
+	"$WORK/ga_bscat/ga_floor.ofdx" > "$WORK/ga_bscat_lo/ga_floor.ofdx"
+if "$GA_SOLVER" "$WORK/ga_bscat_lo" > /dev/null 2>&1; then
+	dump "$WORK/ga_bscat_lo/rir.wav" > "$WORK/ga_bscat_lo/rir.txt"
+	chk "ga band-scat 500 Hz clean" "$(ga_mag "$WORK/ga_bscat_lo/rir.txt" 500)" \
+		"$(ga_cf2 "$r0f" "$r1f" 500)" 0.01
+else
+	say_ng "ga band-scat 500 Hz clean" " (solver failed)"
+fi
+# (L2) 室既定 (acoustic.ga.scattering) の配列 : 床行に scattering 無し ->
+# 既定の配列が床に効く (期待値は L1 と同じ閉形式)
+rm -rf "$WORK/ga_bscat_def"; mkdir -p "$WORK/ga_bscat_def"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_bscat_def/"
+cat > "$WORK/ga_bscat_def/ga_floor.ofdx" <<'EOF'
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 4, "alpha": [0, 0, 0, 0, 0, 0] },
+      { "enabled": true, "role": 1, "alpha": [1, 1, 1, 1, 1, 1] },
+      { "enabled": true, "role": 2, "alpha": [1, 1, 1, 1, 1, 1] },
+      { "enabled": true, "role": 3, "alpha": [1, 1, 1, 1, 1, 1] }
+    ],
+    "ga": { "image_order": 2, "rays": 2000, "scattering": [1, 1, 1, 1, 1, 0], "air_absorption": false }
+  }
+}
+EOF
+if "$GA_SOLVER" "$WORK/ga_bscat_def" > /dev/null 2>&1; then
+	dump "$WORK/ga_bscat_def/rir.wav" > "$WORK/ga_bscat_def/rir.txt"
+	chk "ga band-scat room default" "$(ga_mag "$WORK/ga_bscat_def/rir.txt" 4000)" \
+		"$(ga_cf2 "$r0f" "$r1f" 4000)" 0.01
+else
+	say_ng "ga band-scat room default" " (solver failed)"
+fi
+# (L3) obstacles 行の配列 : ga_panel の板 s = [1,1,1,1,0,0] -> 2 kHz が清浄
+rm -rf "$WORK/ga_bscat_obs"; mkdir -p "$WORK/ga_bscat_obs"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_bscat_obs/"
+sed 's/"scattering": 0.0/"scattering": 0.0, "air_absorption": false, "obstacles": [ { "geometry": 1, "scattering": [1, 1, 1, 1, 0, 0] } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_bscat_obs/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_bscat_obs" > /dev/null 2>&1; then
+	dump "$WORK/ga_bscat_obs/rir.wav" > "$WORK/ga_bscat_obs/rir.txt"
+	r0p=$(awk 'BEGIN{printf "%.10f", sqrt(17.17)}')
+	r1p=$(awk 'BEGIN{printf "%.10f", sqrt(77.65)}')
+	chk "ga band-scat obstacle" "$(ga_mag "$WORK/ga_bscat_obs/rir.txt" 2000)" \
+		"$(ga_cf2 "$r0p" "$r1p" 2000)" 0.01
+else
+	say_ng "ga band-scat obstacle" " (solver failed)"
+fi
+# 範囲外の配列値は既定値に落とさず非零終了 (数値を捏造しない)
+rm -rf "$WORK/ga_bscat_bad"; mkdir -p "$WORK/ga_bscat_bad"
+cp "$SRC/ga_floor.ofd" "$WORK/ga_bscat_bad/"
+sed 's/"scattering": \[1, 1, 1, 1, 1, 0\]/"scattering": [0, 1.5]/' \
+	"$WORK/ga_bscat/ga_floor.ofdx" > "$WORK/ga_bscat_bad/ga_floor.ofdx"
+if "$GA_SOLVER" "$WORK/ga_bscat_bad" > /dev/null 2> "$WORK/ga_bscat_bad/stderr.log"; then
+	say_ng "ga band-scat bad value" " (should fail)"
+elif grep -qi "scattering" "$WORK/ga_bscat_bad/stderr.log" && \
+     [ ! -f "$WORK/ga_bscat_bad/rir.wav" ]; then
+	printf "%-26s -> OK (refused with the offending key)\n" "ga band-scat bad value"
+else
+	say_ng "ga band-scat bad value" " (no reason in stderr)"
 fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"

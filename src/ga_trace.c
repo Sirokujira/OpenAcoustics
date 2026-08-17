@@ -23,7 +23,7 @@
  *     on なら局所反応の R(theta) = (zeta cos - 1)/(zeta cos + 1)。
  *     展開空間では経路が 1 本の直線なので、軸 a の面での cos(theta) は
  *     どの反射でも |u_a| (u = 展開直線の単位方向) で与えられる。
- *   - sqrt(1 - s_k) : 面ごとの散乱係数で鏡面成分から抜ける分。
+ *   - sqrt(1 - s_k,b) : 面ごと (バンド別) の散乱係数で鏡面成分から抜ける分。
  *   - 10^(-a_b r/20) : ISO 9613-1 の空気吸収 (音圧レベル a_b [dB/m])。
  *   到達時刻は t = r/c。t = 0 は音源発火時刻なので遅延は入れない。
  *
@@ -44,11 +44,15 @@
  * 二重計上の回避 : 鏡像法が厳密に受け持つ経路 — 反射回数が order 以下で
  * 一度も拡散反射していない鏡面経路 — はレイ側で検出しない。障害物の面も
  * 鏡像法の対象になったので、条件は「次数」と「拡散したか」だけで決まる。
- * 散乱係数 s のぶんは鏡像の振幅から面ごとに sqrt(1-s) で抜いてあるので、
- * 「鏡面成分 = 鏡像法、拡散成分 = レイ」で過不足なく 1 回ずつ数えられる。
+ * 散乱係数 s_b のぶんは鏡像の振幅から面ごと・バンドごとに sqrt(1-s_b) で
+ * 抜いてあり、レイ側は重み付き抽選 (下記) で期待値どおり s_b / (1-s_b) を
+ * 運ぶので、「鏡面成分 = 鏡像法、拡散成分 = レイ」で過不足なく 1 回ずつ
+ * 数えられる。
  *
- * 拡散反射 (Lambert) : 散乱係数は面ごと (.ofdx の absorption 行の
- * scattering、省略時は acoustic.ga.scattering)。
+ * 拡散反射 (Lambert) : 散乱係数は面ごと・バンド別 (.ofdx の absorption 行の
+ * scattering、省略時は acoustic.ga.scattering — どちらも数値か配列)。
+ * 抽選は基準確率 sref (バンド平均) で 1 回、バンド別はエネルギーの
+ * 重み付けで実現する (ga.h と反射処理のコメント参照)。
  */
 #include <math.h>
 #include <stdint.h>
@@ -233,17 +237,22 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 		}
 	}
 
-	/* 振幅 : 音源ゲイン・距離減衰・面ごとの反射係数と散乱・空気吸収 */
+	/* 振幅 : 音源ゲイン・距離減衰・面ごとの反射係数と散乱・空気吸収。
+	 * 散乱の sqrt(1-s_b) はバンド一様な面では gain へ (従来とビット等価)、
+	 * バンド別の面ではバンドループ内で掛ける。 */
 	gain = c->sgain / (4.0 * GA_PI * r);
 	for (k = 0; k < depth; k++) {
 		const ga_surf_t *s = &g->surf[seq[k]];
 		ct[k] = fabs(u[s->axis]);
-		gain *= sqrt(1.0 - s->scatter);
+		if (s->suni) gain *= sqrt(1.0 - s->scatter[0]);
 	}
 	for (b = 0; b < GA_NBAND; b++) {
 		double v = gain * pow(10.0, -g->air_db_m[b] * r / 20.0);
-		for (k = 0; k < depth; k++)
-			v *= surf_refl(g, &g->surf[seq[k]], b, ct[k]);
+		for (k = 0; k < depth; k++) {
+			const ga_surf_t *s = &g->surf[seq[k]];
+			v *= surf_refl(g, s, b, ct[k]);
+			if (!s->suni) v *= sqrt(1.0 - s->scatter[b]);
+		}
 		amp[b] = v;
 	}
 	/* 全バンドで消えている像は置かない (alpha = 1 の壁など) */
@@ -527,13 +536,26 @@ int ga_rays(ga_t *g)
 					double rr = surf_refl(g, sf, b, ct);
 					w[b] *= rr * rr;                     /* エネルギー反射率 */
 				}
-				if (sf->scatter > 0.0)
-					diffuse = (hash01(q + 3u) < sf->scatter);
+				/* 拡散/鏡面の抽選は基準確率 sref で 1 回 (1 本のレイが
+				 * 全バンドを運ぶため)。バンド別の散乱係数は重み付けで実現 :
+				 * 拡散枝 w_b *= s_b/sref、鏡面枝 w_b *= (1-s_b)/(1-sref)。
+				 * 期待値は各バンドで厳密に s_b / (1-s_b) となり、鏡像側の
+				 * sqrt(1-s_b) と過不足なく対応する (二重計上なし)。
+				 * バンド一様 (suni) なら重みは厳密に 1 なので掛けない
+				 * (従来動作とビット等価)。 */
+				if (sf->sref > 0.0)
+					diffuse = (hash01(q + 3u) < sf->sref);
 				if (diffuse) {
+					if (!sf->suni)
+						for (b = 0; b < GA_NBAND; b++)
+							w[b] *= sf->scatter[b] / sf->sref;
 					lambert_dir(d, ax, sgn, hash01(q + 1u), hash01(q + 2u));
 					scattered = 1;
 				}
 				else {
+					if (!sf->suni)
+						for (b = 0; b < GA_NBAND; b++)
+							w[b] *= (1.0 - sf->scatter[b]) / (1.0 - sf->sref);
 					d[ax] = -d[ax];
 				}
 				g->qidx++;
