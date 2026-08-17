@@ -143,11 +143,12 @@ int main(int argc, char **argv)
 	for (w = 0; w < GA_NWALL; w++) {
 		for (b = 0; b < GA_NBAND; b++)
 			ga.alpha[w][b] = GA_ALPHA_DEFAULT;
-		ga.wall_scatter[w] = -1.0;    /* < 0 = acoustic.ga.scattering を使う */
+		ga.wall_scatter[w][0] = -1.0; /* [0] < 0 = acoustic.ga.scattering を使う */
 	}
 	ga.order    = GA_ORDER_DEFAULT;
 	ga.nrays    = GA_RAYS_DEFAULT;
-	ga.scatter  = GA_SCATTER_DEFAULT;
+	for (b = 0; b < GA_NBAND; b++)
+		ga.scatter[b] = GA_SCATTER_DEFAULT;
 	ga.temp_c   = GA_TEMP_C_DEFAULT;
 	ga.humid    = GA_HUMID_DEFAULT;
 	ga.press_kpa = GA_PRESS_KPA_DEFAULT;

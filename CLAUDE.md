@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 123 判定 (FDTD 50 + 幾何音響 73)。1 本のスクリプトが
+# 検証 : 解析解との比較 130 判定 (FDTD 50 + 幾何音響 80)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**123 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**130 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -131,8 +131,12 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 6. **二重計上の禁止**: 鏡像法が受け持つのは「次数 order 以下・一度も拡散して
    いない鏡面経路」だけで、レイ側はその条件を外れた経路のみ検出する。
    障害物の面も鏡像法の反射面集合に入っているので、条件に障害物は入らない。
-   散乱係数 s のぶんは鏡像の振幅から面ごとに sqrt(1-s) で抜き、抜けた分を
-   レイが受け持つ。どちらかを変えるなら両方直すこと。
+   散乱係数 s_b (面ごと・バンド別) のぶんは鏡像の振幅からバンドごとに
+   sqrt(1-s_b) で抜き、抜けた分をレイが受け持つ。レイの拡散/鏡面の抽選は
+   面ごとの基準確率 s* (バンド平均) で 1 回だけ行い、拡散枝はバンド
+   エネルギーに s_b/s*、鏡面枝に (1-s_b)/(1-s*) を掛ける (重み付き抽選 —
+   期待値は各バンドで厳密、全バンド同値なら重みは 1 でビット等価)。
+   どちらかを変えるなら両方直すこと。番人は (L) の閉形式 DFT 判定。
 7. **鏡像法は面集合 surf[] (軸平行の有限矩形) に対する一般形**: 室 6 面 +
    障害物 AABB の各 6 面。障害物の無い直方体では Allen–Berkley の閉形式と
    厳密に一致しなければならない (次数 3 で像 63 個、次数 2 で 25 個)。
@@ -203,10 +207,11 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 - 幾何音響の拡張は `.ofdx` の `acoustic.ga` に足す (未知キー無視を保つ)。
   FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
   両ソルバーで共有できる。**この性質を壊さないこと**。
-- 幾何音響で未対応のもの (非直方体の室・バンド別散乱係数・回折・音源の
-  指向性) は ReadMe の「幾何音響の制約」に書いてある。音源ごとのゲイン・遅延は
+- 幾何音響で未対応のもの (非直方体の室・回折・音源の指向性) は ReadMe の
+  「幾何音響の制約」に書いてある。音源ごとのゲイン・遅延は
   `.ofdx` の `acoustic.sources[]` で対応済み (ADR-0010 Decision 7 —
-  両ソルバー対称)。障害物の材質は
+  両ソルバー対称)。バンド別の散乱係数は `scattering` の配列指定で対応済み
+  (基準確率での抽選 + バンド別の重み付け — 不変条件 6)。障害物の材質は
   `.ofdx` の `acoustic.ga.obstacles[]` で対応済み (既定は剛体 — FDTD 側は
   常に剛体なので、指定すると高域のみ材質が効く点は ReadMe に明記)。
   実装したら制約表からも消すこと。逆に、原理的に無理なもの (回折、

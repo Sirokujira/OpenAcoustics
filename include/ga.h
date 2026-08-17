@@ -91,7 +91,7 @@ typedef struct {
 	int    surf0;       /* この障害物の 6 面の先頭 surf[] 添字 (無効なら -1) */
 	int    has_mat;     /* 1 = .ofdx acoustic.ga.obstacles で材質指定あり */
 	double mat_alpha[GA_NBAND];  /* バンド別吸音率 (既定 0 = 剛体) */
-	double mat_scatter;          /* 散乱係数 (< 0 = 室の既定を使う) */
+	double mat_scatter[GA_NBAND]; /* 散乱係数 (バンド別。[0] < 0 = 室の既定) */
 } ga_geom_t;
 
 /* 反射面 : 軸平行の有限矩形。室の 6 面と、障害物 (AABB) 1 個あたり 6 面。
@@ -106,7 +106,15 @@ typedef struct {
 	double alpha[GA_NBAND];
 	double refl[GA_NBAND];   /* 垂直入射の圧力反射係数 sqrt(1-alpha) */
 	double zeta[GA_NBAND];   /* 規格化インピーダンス (角度依存吸音のとき使う) */
-	double scatter;          /* 散乱係数 (面ごと) */
+	/* 散乱係数 (面ごと・バンド別)。レイの拡散/鏡面の抽選は 1 本のレイが
+	 * 全バンドを運ぶため 1 回しかできない — 基準確率 sref で抽選し、
+	 * 拡散枝はバンドエネルギーに s_b/sref、鏡面枝に (1-s_b)/(1-sref) を
+	 * 掛ける (重み付き抽選)。期待値は各バンドで厳密に s_b / (1-s_b) になり、
+	 * 鏡像側の sqrt(1-s_b) と過不足なく対応する (二重計上なし)。
+	 * 全バンド同値 (suni = 1) なら重みは厳密に 1 で従来とビット等価。 */
+	double scatter[GA_NBAND];
+	double sref;             /* 抽選の基準確率 (一様なら scatter[0]、他は平均) */
+	int    suni;             /* 1 = 全バンド同値 */
 	int    wall;             /* 室壁なら GA_XM.. / 障害物面なら -1 */
 	int    geom;             /* 障害物番号 (0 起点) / 室壁なら -1 */
 } ga_surf_t;
@@ -149,7 +157,8 @@ typedef struct {
 	int    have_band_alpha;              /* 吸音表を読めたか */
 	double alpha[GA_NWALL][GA_NBAND];    /* バンド別吸音率 */
 	double refl[GA_NWALL][GA_NBAND];     /* 圧力反射係数 R = sqrt(1-alpha) */
-	double wall_scatter[GA_NWALL];       /* 面ごとの散乱係数 (< 0 = 既定を使う) */
+	double wall_scatter[GA_NWALL][GA_NBAND]; /* 面ごとの散乱係数
+	                                     * (バンド別。[w][0] < 0 = 既定を使う) */
 
 	/* 反射面リスト (室 6 面 + 障害物 6 面/個) */
 	ga_surf_t *surf;
@@ -172,7 +181,7 @@ typedef struct {
 	double *srcgain;                     /* nfeed 要素 (既定 1) */
 	double *srcdelay;                    /* nfeed 要素 [s] (既定 0) */
 	double  delay_max;                   /* 発火する音源集合の max(delay) */
-	double scatter;                      /* 拡散反射の割合 (0..1、既定値) */
+	double scatter[GA_NBAND];            /* 拡散反射の割合の室既定 (バンド別) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
 	long   qidx;                         /* 決定的ハッシュ列の位置 */
 	double temp_c, humid, press_kpa;

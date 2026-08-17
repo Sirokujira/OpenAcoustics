@@ -117,14 +117,66 @@ static int jbool(js_t *j, int *v)
 	return 1;
 }
 
+/* ── 散乱係数の値 : 数値 (全バンド同値) または配列 (alpha[] と同じ
+ * 125 Hz〜 の並び。足りないバンドは最後の値で外挿) ─────────────────
+ * 範囲外 (0..1 の外) は既定値に落とさず非零終了する (数値を捏造しない)。
+ * out[] は呼び出し側の既定値のまま上書きされる。値を 1 個以上読んだら
+ * *got = 1 (空配列 [] は何も書かず *got = 0 のまま — キー無しと同じ)。 */
+static int parse_scatter(ga_t *g, js_t *j, double out[GA_NBAND],
+                         int *got, const char *where)
+{
+	double v;
+	int b;
+	if (jpeek(j) == '[') {
+		double a[GA_NBAND];
+		int n = 0;
+		j->s++;
+		if (jpeek(j) == ']') { j->s++; return 0; }
+		for (;;) {
+			if (jnumber(j, &v)) return 1;
+			if (v < 0.0 || v > 1.0) {
+				ga_err(g, ".ofdx %s: scattering[%d] = %g is out of range "
+				       "(0 = specular only .. 1 = fully diffuse)",
+				       where, n + 1, v);
+				return 1;
+			}
+			if (n < GA_NBAND) a[n] = v;
+			n++;
+			if (jpeek(j) == ',') { j->s++; continue; }
+			if (jexpect(j, ']')) return 1;
+			break;
+		}
+		if (n > GA_NBAND) n = GA_NBAND;
+		for (b = 0; b < GA_NBAND; b++)
+			out[b] = (b < n) ? a[b] : a[n - 1];
+		if (n < GA_NBAND)
+			ga_log(g, ".ofdx %s: scattering has %d bands — band %d..%d "
+			       "(%.0f Hz and above) extrapolated from the last value %.4g",
+			       where, n, n + 1, GA_NBAND,
+			       GA_BAND_F0 * (1 << n), a[n - 1]);
+		if (got) *got = 1;
+		return 0;
+	}
+	if (jnumber(j, &v)) return 1;
+	if (v < 0.0 || v > 1.0) {
+		ga_err(g, ".ofdx %s: scattering = %g is out of range "
+		       "(0 = specular only .. 1 = fully diffuse)", where, v);
+		return 1;
+	}
+	for (b = 0; b < GA_NBAND; b++) out[b] = v;
+	if (got) *got = 1;
+	return 0;
+}
+
 /* ── absorption 1 行 ───────────────────────────────────────────── */
 
 typedef struct {
 	int    enabled;
 	int    role;
 	double a[GA_NBAND];
-	int    acount;      /* 読めた alpha の個数 */
-	double scatter;     /* 面ごとの散乱係数 (< 0 = acoustic.ga.scattering) */
+	int    acount;          /* 読めた alpha の個数 */
+	double scat[GA_NBAND];  /* 面ごとの散乱係数 (バンド別) */
+	int    has_scat;        /* 0 = 未指定 (acoustic.ga.scattering を使う) */
 } arow_t;
 
 static int parse_alpha_array(js_t *j, arow_t *row)
@@ -143,15 +195,18 @@ static int parse_alpha_array(js_t *j, arow_t *row)
 	}
 }
 
-static int parse_arow(js_t *j, arow_t *row)
+static int parse_arow(ga_t *g, js_t *j, arow_t *row)
 {
 	char key[64];
 	int b;
 	row->enabled = 1;      /* 欠落キーは既定値 (旧ファイル互換) */
 	row->role = 0;
 	row->acount = 0;
-	row->scatter = -1.0;
-	for (b = 0; b < GA_NBAND; b++) row->a[b] = GA_ALPHA_DEFAULT;
+	row->has_scat = 0;
+	for (b = 0; b < GA_NBAND; b++) {
+		row->a[b] = GA_ALPHA_DEFAULT;
+		row->scat[b] = 0.0;
+	}
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
 	for (;;) {
@@ -170,11 +225,11 @@ static int parse_arow(js_t *j, arow_t *row)
 		}
 		else if (!strcmp(key, "scattering")) {
 			/* 面ごとの散乱係数 (幾何音響の拡張)。省略時は acoustic.ga.scattering。
-			 * バンド別ではなく 1 面 1 値 — 1 本のレイが全バンドを運ぶので
-			 * バンドごとに散乱判定を分けられないため (ReadMe の制約参照)。 */
-			if (jnumber(j, &v)) return 1;
-			if (v < 0.0 || v > 1.0) return 1;
-			row->scatter = v;
+			 * 数値 (全バンド同値) と配列 (バンド別) の両方を受ける —
+			 * 抽選は基準確率 1 回 + バンド別の重み付け (ga.h の説明参照)。 */
+			if (parse_scatter(g, j, row->scat, &row->has_scat,
+			                  "acoustic.absorption"))
+				return 1;
 		}
 		else {
 			if (jskip(j)) return 1;   /* name / area / air_a / 未知キー */
@@ -202,7 +257,7 @@ static int parse_absorption(ga_t *g, js_t *j)
 	if (jpeek(j) == ']') { j->s++; return 0; }
 	for (;;) {
 		arow_t row;
-		if (parse_arow(j, &row)) return 1;
+		if (parse_arow(g, j, &row)) return 1;
 		if (row.enabled && row.role >= 1 && row.role <= 4 && !applied[row.role]) {
 			int walls[2], nw, w, b;
 			double a[GA_NBAND];
@@ -213,13 +268,19 @@ static int parse_absorption(ga_t *g, js_t *j)
 			}
 			nw = role_walls(row.role, walls);
 			for (w = 0; w < nw; w++) {
-				for (b = 0; b < GA_NBAND; b++) g->alpha[walls[w]][b] = a[b];
-				g->wall_scatter[walls[w]] = row.scatter;
+				for (b = 0; b < GA_NBAND; b++) {
+					g->alpha[walls[w]][b] = a[b];
+					g->wall_scatter[walls[w]][b] = row.has_scat
+					                             ? row.scat[b] : -1.0;
+				}
 			}
 			applied[row.role] = 1;
-			if (row.scatter >= 0.0)
-				ga_log(g, ".ofdx: absorption role %d -> scattering = %.4g "
-				       "(per-surface override)", row.role, row.scatter);
+			if (row.has_scat)
+				ga_log(g, ".ofdx: absorption role %d -> scattering = "
+				       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g] "
+				       "(per-surface override)", row.role,
+				       row.scat[0], row.scat[1], row.scat[2], row.scat[3],
+				       row.scat[4], row.scat[5], row.scat[6]);
 			g->have_band_alpha = 1;
 			if (row.acount > 0 && row.acount < GA_NBAND)
 				ga_log(g, ".ofdx: absorption role %d has %d bands — band %d..%d "
@@ -315,11 +376,10 @@ static int parse_receivers(ga_t *g, js_t *j)
 static int parse_obstacle_row(ga_t *g, js_t *j)
 {
 	char key[64];
-	double a[GA_NBAND], v;
-	double scat = -1.0;
-	int acount = 0, idx = 0, enabled = 1, b;
+	double a[GA_NBAND], scat[GA_NBAND], v;
+	int acount = 0, idx = 0, enabled = 1, has_scat = 0, b;
 
-	for (b = 0; b < GA_NBAND; b++) a[b] = 0.0;
+	for (b = 0; b < GA_NBAND; b++) { a[b] = 0.0; scat[b] = 0.0; }
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
 	for (;;) {
@@ -349,14 +409,9 @@ static int parse_obstacle_row(ga_t *g, js_t *j)
 			}
 		}
 		else if (!strcmp(key, "scattering")) {
-			if (jnumber(j, &v)) return 1;
-			if (v < 0.0 || v > 1.0) {
-				ga_err(g, ".ofdx acoustic.ga.obstacles: scattering = %g is "
-				       "out of range (0 = specular only .. 1 = fully diffuse)",
-				       v);
+			if (parse_scatter(g, j, scat, &has_scat,
+			                  "acoustic.ga.obstacles"))
 				return 1;
-			}
-			scat = v;
 		}
 		else {
 			if (jskip(j)) return 1;   /* name / 未知キー */
@@ -381,16 +436,17 @@ static int parse_obstacle_row(ga_t *g, js_t *j)
 			return 0;
 		}
 		o->has_mat = 1;
-		for (b = 0; b < GA_NBAND; b++)
+		for (b = 0; b < GA_NBAND; b++) {
 			o->mat_alpha[b] = (acount <= 0) ? 0.0
 			                : (b < acount) ? a[b] : a[acount - 1];
-		o->mat_scatter = scat;
+			o->mat_scatter[b] = has_scat ? scat[b] : -1.0;
+		}
 		ga_log(g, ".ofdx: obstacle #%d material -> alpha = "
 		       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g], scattering = %s",
 		       idx, o->mat_alpha[0], o->mat_alpha[1], o->mat_alpha[2],
 		       o->mat_alpha[3], o->mat_alpha[4], o->mat_alpha[5],
 		       o->mat_alpha[6],
-		       (scat >= 0.0) ? "(per-obstacle)" : "(room default)");
+		       has_scat ? "(per-obstacle)" : "(room default)");
 	}
 	return 0;
 }
@@ -503,13 +559,9 @@ static int parse_ga(ga_t *g, js_t *j)
 			}
 		}
 		else if (!strcmp(key, "scattering")) {
-			if (jnumber(j, &v)) return 1;
-			if (v < 0.0 || v > 1.0) {
-				ga_err(g, ".ofdx acoustic.ga.scattering = %g is out of range "
-				       "(0 = specular only .. 1 = fully diffuse)", v);
+			/* 室既定の散乱係数。数値 (全バンド同値) と配列 (バンド別) を受ける */
+			if (parse_scatter(g, j, g->scatter, NULL, "acoustic.ga"))
 				return 1;
-			}
-			g->scatter = v;
 		}
 		else if (!strcmp(key, "temperature_c")) {
 			if (jnumber(j, &v)) return 1;
