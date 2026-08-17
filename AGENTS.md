@@ -101,7 +101,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
    ADR-0010。`.ofdx` の `acoustic.multi_source` (既定 false = feed #1 のみ =
    従来動作) を両ソルバーが同じ意味で読む。true では全 feed に同一パルスを
    注入した重ね合わせ (1/N 正規化なし)。音源ごとのゲイン・遅延は
-   `acoustic.sources[]` (同 Decision 7 : gain, delay_s — 既定 1 / 0、
+   `acoustic.feeds[]` (同 Decision 7 : gain, delay_s — 既定 1 / 0、
    範囲外は非零終了) を両ソルバーが同じ意味で読み、音源 i を t = delay_i に
    強度 gain_i で発火させる (計算時間は max(delay) だけ自動延長)。
    ハイブリッド合成 (ADR-0008) のバンドエネルギー整合は両ソルバーが同じ
@@ -209,8 +209,9 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
   両ソルバーで共有できる。**この性質を壊さないこと**。
 - 幾何音響で未対応のもの (非直方体の室・回折・音源の指向性) は ReadMe の
   「幾何音響の制約」に書いてある。音源ごとのゲイン・遅延は
-  `.ofdx` の `acoustic.sources[]` で対応済み (ADR-0010 Decision 7 —
-  両ソルバー対称)。バンド別の散乱係数は `scattering` の配列指定で対応済み
+  `.ofdx` の `acoustic.feeds[]` で対応済み (ADR-0010 Decision 7 —
+  両ソルバー対称。キー名は GUI が `acoustic.sources` を音源一覧として
+  既に使っているため分けてある — 混ぜると静かに誤読する)。バンド別の散乱係数は `scattering` の配列指定で対応済み
   (基準確率での抽選 + バンド別の重み付け — 不変条件 6)。障害物の材質は
   `.ofdx` の `acoustic.ga.obstacles[]` で対応済み (既定は剛体 — FDTD 側は
   常に剛体なので、指定すると高域のみ材質が効く点は ReadMe に明記)。

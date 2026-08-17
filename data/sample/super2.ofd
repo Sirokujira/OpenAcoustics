@@ -25,8 +25,9 @@ title = FDTD check (h): multi-source superposition (linearity of the discrete up
 # 振幅加算 (1/N 正規化なし)」がまとめて検証される (単独実行の物理は
 # 既存の (a)〜(f) が保証している)。
 #
-# ゲイン・遅延の判定 (h2、acoustic.sources を足した変種 — ADR-0010
-# Decision 7)。期待値はコードと独立な IEEE 754 と線形系の性質:
+# ゲイン・遅延の判定 (h2、acoustic.feeds を足した変種 — ADR-0010
+# Decision 7。キーが acoustic.sources でないのは、GUI がそのキーを音源一覧
+# として既に使っているため)。期待値はコードと独立な IEEE 754 と線形系の性質:
 #   - gain = 0.5 : 音源振幅の定数倍は線形系では RIR の定数倍。0.5 は 2 の冪
 #     なので倍精度の全演算・float32 変換と丸めが厳密に可換 — gain = 1 の
 #     RIR の**ビット等価な** 0.5 倍になる。判定は od の 10 進ダンプ経由

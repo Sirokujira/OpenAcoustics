@@ -37,7 +37,7 @@ fmax = 68.6 Hz)。そこで**低域 = FDTD、高域 = 幾何音響**のハイブ
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 (解析解との比較 — 81 判定 : FDTD 40 + 幾何音響 41)
+# 検証 (解析解との比較 — 130 判定 : FDTD 50 + 幾何音響 80)
 # 第 3 引数を省略すると実行ファイル名の fdtd -> ga 置換で高域側を見つける
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 ```
@@ -77,7 +77,7 @@ ofdx_acoustic_ga   <working_dir> [<input_file.ofd>]   # 高域 (幾何音響)
   にしないこと (同じ `.ofdx` を共有していれば自動的に揃う)。metadata には
   `multi_source` と `sources[]` (使用した全音源) が追加される。
 - **音源ごとのゲイン・遅延** (ADR-0010 Decision 7): `.ofdx` の
-  `acoustic.sources[]` = `[ { "gain": g, "delay_s": d }, ... ]` (並びは
+  `acoustic.feeds[]` = `[ { "gain": g, "delay_s": d }, ... ]` (並びは
   `.ofd` の feed 行の順)。音源 i は **t = d_i に強度 g_i で発火**する
   (幾何音響の直接音は t = d_i + r_i/c、FDTD はパルス中心が t0 + d_i。
   負の gain は極性反転)。行・キーの省略は既定値 g = 1 / d = 0 (キー自体を
@@ -85,6 +85,11 @@ ofdx_acoustic_ga   <working_dir> [<input_file.ofd>]   # 高域 (幾何音響)
   範囲外は既定値に落とさず非零終了。計算時間は max(d_i) だけ自動延長する。
   `multi_source = false` でも entry #1 は feed #1 に効く。metadata の
   `sources[]` 各要素に `gain` / `delay_s` が入る。指向性は未対応。
+  キーが `acoustic.sources` でないのは、GUI (OpenFDTD-X) がそのキーを
+  **音源一覧** (AcousticSourceTab の配置表 — `name` / `kind` / `pos_m` /
+  `level_db`) として既に使っているため。あちらは GUI が置いた音源、
+  こちらは `.ofd` の feed 行で、並びも意味も別物なので名前を分けてある
+  (ソルバーは `acoustic.sources` を未知キーとして読み飛ばす)。
 
 ### 出力 (working_dir 直下 — ADR-0007 契約)
 
@@ -313,7 +318,7 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
   縁での回折が効く低域では、影の側の音圧を過小評価する。
 - **音源は無指向性**。複数音源は `.ofdx` の `acoustic.multi_source`
   (ADR-0010 — 既定は feed #1 のみ)、音源ごとのゲイン・遅延は
-  `acoustic.sources[]` (同 Decision 7) で対応済み。**指向性は未対応**
+  `acoustic.feeds[]` (同 Decision 7) で対応済み。**指向性は未対応**
   (バンド別の指向性パターンの定義を伴うため — 全音源とも無指向)。
   後期残響は音源間で**エネルギー加算** (gain² 重み、インコヒーレント) —
   FDTD 側の振幅加算とは実現が異なるが、帯域内クロス項の期待値は 0 なので
@@ -396,7 +401,7 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
   周波数依存インピーダンス境界は将来課題。
 - **音源は既定で単一** (`feed` #1 のみ + warning)。`.ofdx` の
   `acoustic.multi_source` で全 feed の同時発火 (重ね合わせ) に切り替え可
-  (ADR-0010)。音源ごとのゲイン・遅延は `acoustic.sources[]` (同 Decision 7)
+  (ADR-0010)。音源ごとのゲイン・遅延は `acoustic.feeds[]` (同 Decision 7)
   で指定できる。指向性は未対応。
 - **shape 1 (直方体) 以外の geometry は AABB 近似** (warning を出す)。
 - **壁は局所反応**: 斜入射の角度依存吸音は Z 一定の範囲でのみ表現される。
