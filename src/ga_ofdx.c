@@ -451,13 +451,19 @@ static int parse_obstacle_row(ga_t *g, js_t *j)
 	return 0;
 }
 
-/* ── acoustic.sources : 音源ごとのゲイン・遅延 (ADR-0010 Decision 7) ──
+/* ── acoustic.feeds : feed ごとのゲイン・遅延 (ADR-0010 Decision 7) ──
  * [ { gain, delay_s }, ... ] — 並びは .ofd の feed 行の順 (entry #1 =
  * feed #1)。行・キーの省略は既定値 gain = 1 / delay_s = 0 (従来動作)。
  * feed 数を超える行は warning + 無視。範囲外 (|gain| > 1000、delay_s < 0
  * または > 1 s) は既定値に落とさず非零終了する (数値を捏造しない)。
- * FDTD 側 (input_ofdx.c) と対称に実装する。 */
-static int parse_sources(ga_t *g, js_t *j)
+ * FDTD 側 (input_ofdx.c) と対称に実装する。
+ *
+ * キー名の注意 : acoustic.sources は**使えない**。GUI (OpenFDTD-X) が
+ * そのキーを音源一覧 (AcousticSourceTab の配置表) として既に書いており、
+ * 意味も並びも別物だから (あちらは GUI が置いた音源、こちらは .ofd の
+ * feed 行)。両者を同じキーに載せると、GUI 側が gain 列を足した瞬間に
+ * ソルバーが黙って別の意味で読む。 */
+static int parse_feeds(ga_t *g, js_t *j)
 {
 	int idx = 0, warned = 0, b;
 	if (!g->srcgain) {
@@ -466,7 +472,7 @@ static int parse_sources(ga_t *g, js_t *j)
 		g->srcdelay = (double *)calloc((size_t)(g->nfeed > 0 ? g->nfeed : 1),
 		                               sizeof(double));
 		if (!g->srcgain || !g->srcdelay) {
-			ga_err(g, "out of memory (acoustic.sources, %d feeds)", g->nfeed);
+			ga_err(g, "out of memory (acoustic.feeds, %d entries)", g->nfeed);
 			return 1;
 		}
 		for (b = 0; b < g->nfeed; b++) g->srcgain[b] = 1.0;
@@ -485,7 +491,7 @@ static int parse_sources(ga_t *g, js_t *j)
 				if (!strcmp(key, "gain")) {
 					if (jnumber(j, &v)) return 1;
 					if (!(v >= -GA_GAIN_MAX && v <= GA_GAIN_MAX)) {
-						ga_err(g, ".ofdx acoustic.sources[%d].gain = %g is out "
+						ga_err(g, ".ofdx acoustic.feeds[%d].gain = %g is out "
 						       "of range (|gain| <= %g; negative = polarity "
 						       "inversion)", idx + 1, v, GA_GAIN_MAX);
 						return 1;
@@ -495,7 +501,7 @@ static int parse_sources(ga_t *g, js_t *j)
 				else if (!strcmp(key, "delay_s")) {
 					if (jnumber(j, &v)) return 1;
 					if (!(v >= 0.0 && v <= GA_DELAY_MAX)) {
-						ga_err(g, ".ofdx acoustic.sources[%d].delay_s = %g is "
+						ga_err(g, ".ofdx acoustic.feeds[%d].delay_s = %g is "
 						       "out of range (0 .. %g s; t = 0 is the common "
 						       "time origin — delays cannot be negative)",
 						       idx + 1, v, GA_DELAY_MAX);
@@ -514,11 +520,11 @@ static int parse_sources(ga_t *g, js_t *j)
 		if (idx < g->nfeed) {
 			g->srcgain[idx]  = gain;
 			g->srcdelay[idx] = delay;
-			ga_log(g, ".ofdx: source #%d -> gain = %.4g, delay = %.4g s",
+			ga_log(g, ".ofdx: feed #%d -> gain = %.4g, delay = %.4g s",
 			       idx + 1, gain, delay);
 		}
 		else if (!warned) {
-			ga_log(g, "warning: .ofdx acoustic.sources has more entries than "
+			ga_log(g, "warning: .ofdx acoustic.feeds has more entries than "
 			       "the .ofd has feeds (%d) — extra entries ignored", g->nfeed);
 			warned = 1;
 		}
@@ -659,10 +665,15 @@ static int walk_acoustic(ga_t *g, js_t *j)
 			if (jbool(j, &bv)) return 1;
 			g->multi_source = bv;
 		}
-		else if (!strcmp(key, "sources")) {
-			/* 音源ごとのゲイン・遅延 (ADR-0010 Decision 7)。multi_source と
-			 * 同じく acoustic 直下 — FDTD 側も同じキーを読む (対称)。 */
-			if (parse_sources(g, j)) return 1;
+		else if (!strcmp(key, "feeds")) {
+			/* feed ごとのゲイン・遅延 (ADR-0010 Decision 7)。multi_source と
+			 * 同じく acoustic 直下 — FDTD 側も同じキーを読む (対称)。
+			 * キー名が "sources" でないのは、GUI (OpenFDTD-X) が
+			 * acoustic.sources を**音源一覧** (AcousticSourceTab の配置表 :
+			 * name/kind/pos_m/level_db) として既に使っているため。
+			 * 本キーは .ofd の feed 行に 1 対 1 で対応する別物なので、
+			 * 名前も分ける (混ぜると GUI の列追加で静かに誤読する)。 */
+			if (parse_feeds(g, j)) return 1;
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(g, j)) return 1;
