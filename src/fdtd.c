@@ -206,8 +206,42 @@ int ac_setup(ac_t *ac)
 	ac->sigma = 2.0 / (AC_PI * ac->fmax);
 	ac->t0    = 5.0 * ac->sigma;
 
+	/* ── 実効吸音率 : 有効帯域 [0, fmax] と重なるオクターブバンドだけを平均 ──
+	 * .ofdx の alpha[] は 125 Hz .. 4 kHz の 6 バンド。本ソルバーは低域担当で
+	 * 上限が fmax = c/(10 dx) なので、そこより上のバンド (ホール規模なら
+	 * 1 kHz 以上) の吸音率まで混ぜて壁を決めるのは誤り — 幾何音響側
+	 * (バンド別に使う) とのクロスオーバー整合も崩れる。バンド b の範囲は
+	 * [fc_b/sqrt(2), fc_b*sqrt(2)] なので、fc_b <= fmax*sqrt(2) のバンドが
+	 * 帯域と重なる。1 つも重ならない (fmax < 88.4 Hz) 場合は最低バンド
+	 * 125 Hz の値を使う (壁を既定値に落とさない)。 */
+	{
+		double fc, hi = AC_BAND_F0 * AC_SQRT2;
+		int nb = 0, b;
+		for (b = 0, fc = AC_BAND_F0; b < AC_NBAND_OFDX; b++, fc *= 2.0) {
+			if (fc > ac->fmax * AC_SQRT2) break;
+			nb++;
+			hi = fc * AC_SQRT2;
+		}
+		ac->alpha_nband   = (nb > 0) ? nb : 1;
+		ac->alpha_band_hi = hi;
+		for (w = 0; w < AC_NWALL; w++) {
+			double sum = 0.0;
+			for (b = 0; b < ac->alpha_nband; b++) sum += ac->alpha_bands[w][b];
+			ac->alpha[w] = sum / ac->alpha_nband;
+		}
+		if (nb > 0)
+			ac_log(ac, "absorption: using %d of %d octave bands "
+			       "(125 Hz .. %g Hz, band edges up to %.4g Hz <= fmax*sqrt(2))",
+			       ac->alpha_nband, AC_NBAND_OFDX,
+			       AC_BAND_F0 * pow(2.0, (double)(ac->alpha_nband - 1)), hi);
+		else
+			ac_log(ac, "absorption: warning: fmax = %.4g Hz is below the "
+			       "lowest octave band (125 Hz, lower edge %.4g Hz) — using the "
+			       "125 Hz alpha for all walls", ac->fmax, AC_BAND_F0 / AC_SQRT2);
+	}
+
 	/* ── 計算時間 : T = clamp(1.5·T_Sabine, 0.5, 3.0)
-	 * T_Sabine = 0.161·V/A。A は吸音表 (壁 6 面 × 帯域平均 α) から。
+	 * T_Sabine = 0.161·V/A。A は吸音表 (壁 6 面 × 実効 α) から。
 	 * 表が無い場合も既定 α=0.1 の 6 面で同じ式 (input_ofdx.c の既定値)。 ── */
 	lx = nx * ac->dx; ly = ny * ac->dx; lz = nz * ac->dx;
 	vol = lx * ly * lz;
@@ -281,11 +315,12 @@ int ac_setup(ac_t *ac)
 			ac->wA[w] = (ma - Z / 2.0) / (ma + Z / 2.0);
 			ac->wB[w] = 1.0 / (ma + Z / 2.0);
 		}
-		ac_log(ac, "wall %d (%s): alpha = %.4g -> %s", w,
+		ac_log(ac, "wall %d (%s): alpha = %.4g (mean of %d band(s), "
+		       "<= %.4g Hz) -> %s", w,
 		       (w == AC_XM) ? "x-" : (w == AC_XP) ? "x+" :
 		       (w == AC_YM) ? "y-" : (w == AC_YP) ? "y+" :
 		       (w == AC_ZM) ? "z-" : "z+",
-		       ac->alpha[w],
+		       ac->alpha[w], ac->alpha_nband, ac->alpha_band_hi,
 		       ac->wrigid[w] ? "rigid" : "impedance");
 	}
 

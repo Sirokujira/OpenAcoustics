@@ -8,7 +8,8 @@
  *       role の対応 (OpenFDTD-X の AcousticTab 吸音表) :
  *         4 = Floor    → z-        1 = Ceiling → z+
  *         2 = SideWall → y- と y+   3 = RearWall → x- と x+
- *       FDTD 側は alpha[6] を帯域平均に潰すが、幾何音響は**バンド別に使う**
+ *       FDTD 側は有効帯域 [0, fmax] と重なるバンドだけを平均した 1 値を使うが、
+ *       幾何音響は**バンド別に使う**
  *       (これが幾何音響側の利点)。alpha[] は 125/250/500/1k/2k/4k Hz の
  *       6 バンドなので、8 kHz バンドは 4 kHz の値を外挿する (log に明示)。
  *

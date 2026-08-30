@@ -9,7 +9,8 @@
  *   4 = Floor    → z-        1 = Ceiling → z+
  *   2 = SideWall → y- と y+   3 = RearWall → x- と x+
  * 他の role と欠落した壁は既定 α = AC_ALPHA_DEFAULT (0.1)。
- * 6 バンド alpha 配列は v1 では帯域平均を使う (周波数依存境界は将来課題)。
+ * 6 バンド alpha 配列は**そのまま保持**し、境界インピーダンスに使う 1 値は
+ * ac_setup が有効帯域 [0, fmax] と重なるバンドだけから決める (acoustic.h)。
  * 同一 role の行が複数あるときは最初の enabled 行を使う。
  */
 #include <stdio.h>
@@ -116,8 +117,8 @@ static int jbool(js_t *j, int *v)
 typedef struct {
 	int    enabled;
 	int    role;
-	double asum;
-	int    acount;
+	double a[AC_NBAND_OFDX];   /* バンド別吸音率 (125 Hz .. 4 kHz) */
+	int    acount;             /* 読めた値の個数 */
 } row_t;
 
 static int parse_alpha_array(js_t *j, row_t *row)
@@ -127,7 +128,9 @@ static int parse_alpha_array(js_t *j, row_t *row)
 	for (;;) {
 		double v;
 		if (jnumber(j, &v)) return 1;
-		row->asum += v;
+		if (v < 0.0) v = 0.0;
+		if (v > 1.0) v = 1.0;
+		if (row->acount < AC_NBAND_OFDX) row->a[row->acount] = v;
 		row->acount++;
 		if (jpeek(j) == ',') { j->s++; continue; }
 		return jexpect(j, ']');
@@ -137,10 +140,11 @@ static int parse_alpha_array(js_t *j, row_t *row)
 static int parse_row(js_t *j, row_t *row)
 {
 	char key[64];
+	int b;
 	row->enabled = 1;      /* 欠落キーは既定値 (旧ファイル互換) */
 	row->role = 0;
-	row->asum = 0.0;
 	row->acount = 0;
+	for (b = 0; b < AC_NBAND_OFDX; b++) row->a[b] = AC_ALPHA_DEFAULT;
 	if (jexpect(j, '{')) return 1;
 	if (jpeek(j) == '}') { j->s++; return 0; }
 	for (;;) {
@@ -186,15 +190,22 @@ static int parse_absorption(ac_t *ac, js_t *j)
 		row_t row;
 		if (parse_row(j, &row)) return 1;
 		if (row.enabled && row.role >= 1 && row.role <= 4 && !applied[row.role]) {
-			int walls[2], nw, w;
-			double a = (row.acount > 0) ? row.asum / row.acount : AC_ALPHA_DEFAULT;
-			if (a < 0.0) a = 0.0;
-			if (a > 1.0) a = 1.0;
+			int walls[2], nw, w, b;
+			double a[AC_NBAND_OFDX];
+			/* 足りないバンドは最後の値で外挿 (幾何音響側と同じ規則)。
+			 * 実効値 (境界に使う 1 値) は fmax が決まる ac_setup で選ぶ。 */
+			for (b = 0; b < AC_NBAND_OFDX; b++)
+				a[b] = (row.acount <= 0)   ? AC_ALPHA_DEFAULT
+				     : (b < row.acount)    ? row.a[b]
+				                           : row.a[row.acount - 1];
 			nw = role_walls(row.role, walls);
-			for (w = 0; w < nw; w++) ac->alpha[walls[w]] = a;
+			for (w = 0; w < nw; w++)
+				for (b = 0; b < AC_NBAND_OFDX; b++)
+					ac->alpha_bands[walls[w]][b] = a[b];
 			applied[row.role] = 1;
-			ac_log(ac, ".ofdx: absorption role %d -> alpha = %.4g (band average of %d)",
-			       row.role, a, row.acount);
+			ac_log(ac, ".ofdx: absorption role %d -> alpha = "
+			       "[%.4g %.4g %.4g %.4g %.4g %.4g] (125 Hz .. 4 kHz)",
+			       row.role, a[0], a[1], a[2], a[3], a[4], a[5]);
 		}
 		if (jpeek(j) == ',') { j->s++; continue; }
 		return jexpect(j, ']');
@@ -468,9 +479,6 @@ int ac_read_ofdx(ac_t *ac)
 		       ac->ofdx_path);
 		return 1;
 	}
-	ac_log(ac, "wall absorption (band-averaged): "
-	       "x- %.4g, x+ %.4g, y- %.4g, y+ %.4g, z- %.4g, z+ %.4g",
-	       ac->alpha[AC_XM], ac->alpha[AC_XP], ac->alpha[AC_YM],
-	       ac->alpha[AC_YP], ac->alpha[AC_ZM], ac->alpha[AC_ZP]);
+	/* 実効値 (どのバンドを使うか) は fmax が決まる ac_setup で決めてログする */
 	return 0;
 }

@@ -22,6 +22,8 @@
 #define AC_CFL           0.99        /* Courant 数の上限 (c·dt·sqrt(3)/dx <= 0.99) */
 #define AC_MAX_CELLS     30000000    /* セル総数の上限 (超えたら非零終了) */
 #define AC_ALPHA_DEFAULT 0.1        /* 吸音表が無い/該当 role が無い壁の吸音率 */
+#define AC_NBAND_OFDX    6          /* .ofdx alpha[] のバンド数 (125 Hz .. 4 kHz) */
+#define AC_BAND_F0       125.0      /* 最低バンドの中心周波数 [Hz] */
 #define AC_TMIN          0.5        /* 計算時間 T = clamp(1.5 T_Sabine, 0.5, 3.0) [s] */
 #define AC_TMAX          3.0
 #define AC_SABINE_COEF   0.161      /* T_Sabine = 0.161 V/A */
@@ -35,6 +37,7 @@
 #define AC_PATH_MAX  4096
 #define AC_NAME_MAX  64
 #define AC_PI        3.14159265358979323846
+#define AC_SQRT2     1.41421356237309504880   /* オクターブバンドの端 (fc/√2, fc·√2) */
 
 /* 外壁インデックス (alpha[] / 境界係数の並び) */
 enum { AC_XM = 0, AC_XP, AC_YM, AC_YP, AC_ZM, AC_ZP, AC_NWALL };
@@ -81,9 +84,19 @@ typedef struct {
 	double    *freq1;                  /* frequency1 (記録のみ、物理には不使用) */
 	int        nfreq1;
 
-	/* .ofdx (吸音率、壁ごと。帯域平均済み) */
+	/* .ofdx (吸音率、壁ごと) */
 	int    have_ofdx;
+	/* バンド別吸音率 (125 Hz .. 4 kHz)。読んだ値をそのまま保持する。 */
+	double alpha_bands[AC_NWALL][AC_NBAND_OFDX];
+	/* 実効吸音率 (境界インピーダンスに使う 1 値)。ac_setup が
+	 * **有効帯域 [0, fmax] と重なるオクターブバンドだけ**を平均して決める
+	 * (fmax = c/(10 dx) は格子で決まる上限)。低域担当のソルバーが 4 kHz の
+	 * 吸音率まで混ぜて壁を決めるのは誤りで、幾何音響側 (バンド別に使う) との
+	 * クロスオーバー整合も崩れるため。重なるバンドが無い (fmax < 88.4 Hz) 場合は
+	 * 最低バンド 125 Hz の値を使う。 */
 	double alpha[AC_NWALL];
+	int    alpha_nband;                /* 実効値に使ったバンド数 */
+	double alpha_band_hi;              /* 使ったバンドの上端 [Hz] (ログ/metadata) */
 	/* 複数音源 (契約は OpenFDTD-X の ADR-0010) : .ofdx acoustic.multi_source
 	 * (既定 false = feed #1 のみ = 従来動作)。true で全 feed に同一の
 	 * ガウシアン微分パルスを注入し (共通 t0)、rir.wav は重ね合わせになる。

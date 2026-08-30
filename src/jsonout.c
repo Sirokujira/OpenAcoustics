@@ -106,6 +106,24 @@ int ac_write_metadata(ac_t *ac)
 	fprintf(fp, "  \"boundary_alpha\": [%.10g, %.10g, %.10g, %.10g, %.10g, %.10g],\n",
 	        ac->alpha[AC_XM], ac->alpha[AC_XP], ac->alpha[AC_YM],
 	        ac->alpha[AC_YP], ac->alpha[AC_ZM], ac->alpha[AC_ZP]);
+	/* 実効 alpha の出所 (追加キーのみ — ADR-0007 の既存キーは不変)。
+	 * boundary_alpha は「有効帯域と重なるバンドの平均」なので、その根拠を
+	 * バンド別の生値と使ったバンド数・上端で示す。 */
+	{
+		int w, b;
+		fprintf(fp, "  \"boundary_alpha_bands\": [\n");
+		for (w = 0; w < AC_NWALL; w++) {
+			fprintf(fp, "    [");
+			for (b = 0; b < AC_NBAND_OFDX; b++)
+				fprintf(fp, "%.10g%s", ac->alpha_bands[w][b],
+				        (b + 1 < AC_NBAND_OFDX) ? ", " : "");
+			fprintf(fp, "]%s\n", (w + 1 < AC_NWALL) ? "," : "");
+		}
+		fprintf(fp, "  ],\n");
+		fprintf(fp, "  \"boundary_alpha_band_f0_hz\": %.10g,\n", AC_BAND_F0);
+		fprintf(fp, "  \"boundary_alpha_bands_used\": %d,\n", ac->alpha_nband);
+		fprintf(fp, "  \"boundary_alpha_band_hi_hz\": %.10g,\n", ac->alpha_band_hi);
+	}
 	fprintf(fp, "  \"t_sabine_s\": %.10g,\n", ac->tsab);   /* -1 = A=0 (無限大) */
 	fprintf(fp, "  \"rigid_geometries\": %d,\n", ac->ngeom);
 	fprintf(fp, "  \"ofdx_sidecar\": %s\n", ac->have_ofdx ? "true" : "false");

@@ -7,6 +7,8 @@
 # ── ofdx_acoustic_fdtd (低域担当、FDTD) の判定 :
 #  (a) 剛体閉箱 4x3x2.5 m の軸モード f_100/f_010/f_001 が ±3% (走査 DFT)
 #  (b) 準 1D 管の端面反射 R = sqrt(1-alpha) が ±3% (alpha=0.3, 0.9)
+#  (b3) 有効帯域外 (fmax より上) の alpha が RIR を変えない (バイト一致) —
+#      実効吸音率は [0, fmax] と重なるオクターブバンドだけの平均
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
@@ -226,6 +228,30 @@ run_case tube_a09 tube_a09.ofd tube_a09.ofdx && {
 	res=$(tube_R "$WORK/tube_a09" "$fs_tube")
 	chk "tube a=0.9 R (left)"  "${res% *}" 0.316227766 0.03   # sqrt(0.1)
 	chk "tube a=0.9 R (right)" "${res#* }" 0.316227766 0.03
+}
+
+echo "--- (b3) out-of-band alpha must not change the low-band RIR (bit-identical)"
+# FDTD は低域担当 (fmax = c/(10 dx))。実効吸音率は**有効帯域と重なるオクターブ
+# バンドだけ**の平均で、管では fc <= fmax*sqrt(2) = 970 Hz の 125/250/500 Hz。
+# tube_a03_oob は帯域外 (1k/2k/4k) の alpha だけが違う同一の管なので、
+# rir.wav はバイト単位で一致しなければならない (許容誤差を置かない厳密判定。
+# 6 バンド平均に潰す実装なら実効 alpha が 0.3667 対 0.64 になり必ず落ちる)。
+# metadata の使用バンド数もあわせて確認する (追加キー boundary_alpha*)。
+run_case tube_a03_oob tube_a03_oob.ofd tube_a03_oob.ofdx && {
+	if cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_a03_oob/rir.wav"; then
+		say_ok "out-of-band alpha ignored" " (rir.wav がビット一致)"
+	else
+		say_ng "out-of-band alpha ignored"
+	fi
+	chk "alpha bands used (tube)" \
+	    "$(awk -F: '/boundary_alpha_bands_used/ {gsub(/[ ,\r]/, "", $2); print $2}' \
+	       "$WORK/tube_a03/metadata.json")" 3 0.001
+	chk "alpha band hi (tube)" \
+	    "$(awk -F: '/boundary_alpha_band_hi_hz/ {gsub(/[ ,\r]/, "", $2); print $2}' \
+	       "$WORK/tube_a03/metadata.json")" 707.1067812 0.001
+	chk "effective alpha (tube)" \
+	    "$(awk '/boundary_alpha\"/ {gsub(/[^0-9.,]/, "", $0); split($0, v, ","); print v[1]}' \
+	       "$WORK/tube_a03/metadata.json")" 0.3 0.001
 }
 
 echo "--- (c) direct sound arrival t = t0 + r/c"

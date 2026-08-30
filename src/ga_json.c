@@ -7,7 +7,7 @@
  *          origin_m / size_m は室の直方体で意味を持つ。gridless = true を併記。
  *   source.type / sigma_s / t0_s : 音源は理想インパルス。**t0_s = 0** が
  *          「t = 0 は音源発火時刻」という本ソルバーの時間原点の規約。
- *   boundary_alpha : 従来キーは互換のため帯域平均を出し、バンド別の実値は
+ *   boundary_alpha : 従来キーは互換のため 6 バンド平均を出し、バンド別の実値は
  *          追加キー boundary_alpha_bands に出す。
  * 追加キー : valid_band_hz / bands_hz / boundary_alpha_bands / image_order /
  *          rays / air / t_eyring_s / amplitude_convention / time_origin。
