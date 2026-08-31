@@ -166,6 +166,50 @@ static void recv_filename(ac_recv_t *r, int index)
 	}
 }
 
+/* ── 局所反応境界の統計入射吸音率と、その逆問題 (角度依存吸音 opt-in 用) ──
+ * 実数の規格化インピーダンス zeta の面に平面波が角度 theta で入るとき
+ *   R(theta) = (zeta cos(theta) - 1) / (zeta cos(theta) + 1)
+ * FDTD の局所反応境界 (v_n = p/Z の半陰的更新) はこの角度依存性を離散化から
+ * **自動的に**持つので、決めるべきは zeta ただ 1 つ。吸音表の alpha は
+ * **ランダム入射** (残響室法) の値なので、Paris の式 (cos 重み平均)
+ *   alpha_stat = 8 zeta int_0^1 x^2/(zeta x + 1)^2 dx
+ *              = (8/zeta^2) [ zeta + 1 - 2 ln(1+zeta) - 1/(1+zeta) ]
+ * を逆に解いて zeta を得る (表の値を垂直入射として使うと斜入射で吸音が
+ * 二重に効く)。alpha_stat は zeta = 1.567 付近で最大 0.951 の山型なので、
+ * 逆問題は「山より右 (zeta が大きい = 空気より硬い、通常の吸音材)」の枝で
+ * 二分法を使い、最大値を超える alpha はクランプして警告する。
+ * 幾何音響側 (ga_setup.c の ga_alpha_stat / ga_zeta_from_alpha) と同じ式・
+ * 同じ枝 — 両ソルバーが同じ壁を見るための対称性なので、片方だけ変えない
+ * (別バイナリなので実装は共有しない)。 */
+static double ac_alpha_stat(double zeta)
+{
+	if (zeta <= 0.0) return 0.0;
+	return (8.0 / (zeta * zeta))
+	     * (zeta + 1.0 - 2.0 * log(1.0 + zeta) - 1.0 / (1.0 + zeta));
+}
+
+static double ac_zeta_from_alpha(double alpha_stat)
+{
+	double lo, hi = 1.0e9, peak;
+	int i;
+	{                                    /* 山の位置を三分探索 (決定的) */
+		double a = 0.1, b = 10.0;
+		for (i = 0; i < 200; i++) {
+			double m1 = a + (b - a) / 3.0, m2 = b - (b - a) / 3.0;
+			if (ac_alpha_stat(m1) < ac_alpha_stat(m2)) a = m1; else b = m2;
+		}
+		peak = 0.5 * (a + b);
+	}
+	if (alpha_stat >= ac_alpha_stat(peak)) return peak;
+	if (alpha_stat <= 0.0) return hi;
+	lo = peak;
+	for (i = 0; i < 200; i++) {          /* alpha_stat は [peak, inf) で単調減少 */
+		double mid = 0.5 * (lo + hi);
+		if (ac_alpha_stat(mid) > alpha_stat) lo = mid; else hi = mid;
+	}
+	return 0.5 * (lo + hi);
+}
+
 int ac_setup(ac_t *ac)
 {
 	const double c = AC_C0, rho = AC_RHO0;
@@ -298,30 +342,63 @@ int ac_setup(ac_t *ac)
 		ac_log(ac, "duration: all walls rigid (A = 0, T_Sabine = inf) "
 		       "-> T = %.4g s (%d steps)", tsolve, ac->nsteps);
 
-	/* ── 境界係数 ── */
+	/* ── 境界係数 ──
+	 * 既定 : 吸音表の alpha を**垂直入射**として読み、R = sqrt(1-alpha) から
+	 *   Z = rho c (1+R)/(1-R) を作る (従来動作)。
+	 * angle_dependent_absorption = true : alpha を**ランダム入射**として読み、
+	 *   Paris の式を逆に解いた zeta で Z = rho c zeta にする。境界の角度依存性
+	 *   R(theta) = (zeta cos - 1)/(zeta cos + 1) は離散化から自動的に出る。 */
+	{
+		double amax = ac_alpha_stat(ac_zeta_from_alpha(2.0));   /* 山の高さ */
+		int clamped = 0;
+		for (w = 0; w < AC_NWALL; w++)
+			if (ac->angle_dep && ac->alpha[w] > amax) clamped = 1;
+		if (ac->angle_dep) {
+			ac_log(ac, "angle-dependent absorption: locally reacting boundary "
+			       "Z = rho c zeta; zeta solved from the random-incidence alpha "
+			       "via Paris' formula (max representable alpha_stat = %.4f). "
+			       "R(theta) = (zeta cos - 1)/(zeta cos + 1) follows from the "
+			       "update itself", amax);
+			if (clamped)
+				ac_log(ac, "warning: some alpha exceed %.4f, the largest "
+				       "random-incidence absorption a locally reacting real "
+				       "impedance can have — clamped (the wall is treated as "
+				       "the most absorbing such boundary, not as alpha = 1)",
+				       amax);
+		}
+	}
 	for (w = 0; w < AC_NWALL; w++) {
 		double a = ac->alpha[w];
 		if (a < 1e-6) {
 			ac->wrigid[w] = 1;   /* 剛壁 : 更新なし (v ≡ 0) — 厳密に無損失 */
 			ac->wZ[w] = 0.0;
 			ac->wA[w] = ac->wB[w] = 0.0;
+			ac->wzeta[w] = 0.0;
 		}
 		else {
-			double s = sqrt(1.0 - ((a > 1.0) ? 1.0 : a));
-			double Z = rho * c * (1.0 + s) / (1.0 - s + 1e-300);
-			double ma = rho * ac->dx / (2.0 * ac->dt);
+			double Z, ma = rho * ac->dx / (2.0 * ac->dt);
+			if (ac->angle_dep) {
+				double amax = ac_alpha_stat(ac_zeta_from_alpha(2.0));
+				ac->wzeta[w] = ac_zeta_from_alpha((a > amax) ? amax : a);
+				Z = rho * c * ac->wzeta[w];
+			}
+			else {
+				double s = sqrt(1.0 - ((a > 1.0) ? 1.0 : a));
+				Z = rho * c * (1.0 + s) / (1.0 - s + 1e-300);
+				ac->wzeta[w] = Z / (rho * c);
+			}
 			ac->wrigid[w] = 0;
 			ac->wZ[w] = Z;
 			ac->wA[w] = (ma - Z / 2.0) / (ma + Z / 2.0);
 			ac->wB[w] = 1.0 / (ma + Z / 2.0);
 		}
 		ac_log(ac, "wall %d (%s): alpha = %.4g (mean of %d band(s), "
-		       "<= %.4g Hz) -> %s", w,
+		       "<= %.4g Hz), zeta = %.4g -> %s", w,
 		       (w == AC_XM) ? "x-" : (w == AC_XP) ? "x+" :
 		       (w == AC_YM) ? "y-" : (w == AC_YP) ? "y+" :
 		       (w == AC_ZM) ? "z-" : "z+",
 		       ac->alpha[w], ac->alpha_nband, ac->alpha_band_hi,
-		       ac->wrigid[w] ? "rigid" : "impedance");
+		       ac->wzeta[w], ac->wrigid[w] ? "rigid" : "impedance");
 	}
 
 	/* ── 配列確保 (calloc = 零初期化。決定性のため未初期化領域を作らない) ── */

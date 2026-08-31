@@ -369,7 +369,7 @@ static int parse_feeds(ac_t *ac, js_t *j)
 }
 
 /* root.acoustic の中身 (読むのは absorption / receivers / multi_source /
- * feeds のみ、他は読み飛ばす) */
+ * feeds / angle_dependent_absorption のみ、他は読み飛ばす) */
 static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
@@ -391,6 +391,14 @@ static int walk_acoustic(ac_t *ac, js_t *j)
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "angle_dependent_absorption")) {
+			/* 角度依存吸音 (局所反応境界) : 既定 false = 従来どおり
+			 * R = sqrt(1-alpha) (垂直入射解釈)。acoustic.ga ではなく
+			 * acoustic 直下 — 幾何音響側も同じキーを読む (両ソルバーが
+			 * 違う壁で計算するとクロスオーバーの整合が壊れるため)。 */
+			if (jbool(j, &bv)) return 1;
+			ac->angle_dep = bv;
 		}
 		else if (!strcmp(key, "multi_source")) {
 			/* 複数音源の契約 (ADR-0010) : 既定 false = feed #1 のみ。

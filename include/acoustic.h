@@ -103,6 +103,15 @@ typedef struct {
 	 * 幾何音響側 (ofdx_acoustic_ga) と**対称に**実装する — ハイブリッド合成
 	 * (ADR-0008) のバンドエネルギー整合は両ソルバーが同じ音源集合を使う前提。 */
 	int    multi_source;
+	/* 角度依存吸音 (opt-in、既定 false = 従来どおり R = sqrt(1-alpha))。
+	 * .ofdx の `acoustic.angle_dependent_absorption` — multi_source と同じく
+	 * `acoustic` 直下で、幾何音響側 (ofdx_acoustic_ga) も同じキーを読む
+	 * (`acoustic.ga` 側の同名キーがあればそちらが優先)。true では吸音表の
+	 * **ランダム入射** alpha から Paris の式を逆に解いて規格化インピーダンス
+	 * zeta を決め、境界を Z = rho c zeta にする。FDTD の局所反応境界は
+	 * 角度依存性を離散化から自動的に持つので、決めるのは zeta だけ。
+	 * 表の値を垂直入射として使う既定動作は斜入射で吸音が二重に効く。 */
+	int    angle_dep;
 
 	/* 格子と時間 */
 	double dx;
@@ -127,6 +136,7 @@ typedef struct {
 	/* 境界係数 (半陰的局所インピーダンス更新 v+ = wA v- ± wB p) */
 	int    wrigid[AC_NWALL];  /* 1 = 剛壁 (更新しない) */
 	double wZ[AC_NWALL];      /* インピーダンス [Pa s/m] (剛壁は 0) */
+	double wzeta[AC_NWALL];   /* 規格化インピーダンス Z/(rho c) (剛壁は 0) */
 	double wA[AC_NWALL], wB[AC_NWALL];
 
 	/* 場 (フラット配列。VLA 禁止 — OpenPEEC portability.md) */

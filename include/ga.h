@@ -183,6 +183,9 @@ typedef struct {
 	double  delay_max;                   /* 発火する音源集合の max(delay) */
 	double scatter[GA_NBAND];            /* 拡散反射の割合の室既定 (バンド別) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
+	/* acoustic.ga.angle_dependent_absorption を読んだか。acoustic 直下の
+	 * 同名キー (FDTD 側と共有する対称キー) より ga 側を優先するため。 */
+	int    angle_dep_ga;
 	long   qidx;                         /* 決定的ハッシュ列の位置 */
 	double temp_c, humid, press_kpa;
 	int    air_on;

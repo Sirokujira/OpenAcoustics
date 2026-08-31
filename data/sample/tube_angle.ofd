@@ -1,0 +1,31 @@
+OpenFDTD 4 2
+title = acoustic check (i): angle-dependent absorption (locally reacting, Paris)
+# --------------------------------------------------------------------------
+# 検証 (i) : 角度依存吸音 (opt-in) の規格化インピーダンス zeta
+#   .ofdx の acoustic.angle_dependent_absorption = true では、吸音表の alpha を
+#   **ランダム入射** (残響室法) の値として読み、Paris の式
+#     alpha_stat(zeta) = (8/zeta^2) [ zeta + 1 - 2 ln(1+zeta) - 1/(1+zeta) ]
+#   を逆に解いて境界を Z = rho c zeta にする (既定は alpha を垂直入射として
+#   読む R = sqrt(1-alpha) — 表の値を垂直入射に使うと斜入射で吸音が二重に
+#   効く)。alpha_stat は zeta = 1.5537 付近で最大 0.9512 の山型なので、
+#   逆問題は山より右 (硬い側) の枝で解く。
+#     alpha_stat = 0.3 -> zeta = 19.766272
+#   局所反応境界の反射係数は R(theta) = (zeta cos - 1)/(zeta cos + 1) で、
+#   これは FDTD の境界更新 (v_n = p/Z) から**自動的に**出る。実装が決めるのは
+#   zeta ただ 1 つなので、判定はそれが効く垂直入射で行う :
+#     R(0) = (zeta - 1)/(zeta + 1) = 18.766272/20.766272 = 0.903690
+#   (既定動作なら R = sqrt(0.7) = 0.836660 で -7.4% — 許容 ±3% の外なので、
+#   この判定は 2 つの解釈を確実に区別する)
+#   管・音源・受音点・測定窓は tube_a03.ofd と同一 (導出はそちらのコメント)。
+#   期待値の出所は Paris の公式 (教科書) で、acoustic_check.sh が awk で
+#   独立に二分法を解いて作る (C の実装は使わない)。
+#   幾何音響側の同じ切り替えは ga_angle.ofd (斜入射で検証)。両ソルバーが
+#   同じキー acoustic.angle_dependent_absorption を読む (対称)。
+# --------------------------------------------------------------------------
+xmesh = 0.0 160 8.0
+ymesh = 0.0 1 0.05
+zmesh = 0.0 1 0.05
+feed = z 2.025 0.025 0.025 1.0 0.0 50.0
+point = z 3.025 0.025 0.025
+frequency1 = 100.0
+end

@@ -603,9 +603,12 @@ static int parse_ga(ga_t *g, js_t *j)
 		}
 		else if (!strcmp(key, "angle_dependent_absorption")) {
 			/* 局所反応境界の角度依存反射に切り替える。既定 false =
-			 * 従来どおり入射角によらず R = sqrt(1-alpha) (後方互換)。 */
+			 * 従来どおり入射角によらず R = sqrt(1-alpha) (後方互換)。
+			 * acoustic 直下の同名キー (FDTD 側も読む対称キー) より
+			 * こちらが優先 — 幾何音響だけ切り替えたい既存入力のため。 */
 			if (jbool(j, &bv)) return 1;
 			g->angle_dep = bv;
+			g->angle_dep_ga = 1;
 		}
 		else if (!strcmp(key, "obstacles")) {
 			if (jexpect(j, '[')) return 1;
@@ -678,6 +681,14 @@ static int walk_acoustic(ga_t *g, js_t *j)
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(g, j)) return 1;
+		}
+		else if (!strcmp(key, "angle_dependent_absorption")) {
+			/* 角度依存吸音 (局所反応境界) : acoustic.ga ではなく acoustic
+			 * 直下 — FDTD 側も同じキーを読む (両ソルバーが違う壁で計算すると
+			 * クロスオーバーの整合が壊れるため)。acoustic.ga 側に同名キーが
+			 * あればそちらが勝つ (JSON の並び順に依らない)。 */
+			if (jbool(j, &bv)) return 1;
+			if (!g->angle_dep_ga) g->angle_dep = bv;
 		}
 		else if (!strcmp(key, "ga")) {
 			if (parse_ga(g, j)) return 1;

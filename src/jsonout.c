@@ -124,6 +124,14 @@ int ac_write_metadata(ac_t *ac)
 		fprintf(fp, "  \"boundary_alpha_bands_used\": %d,\n", ac->alpha_nband);
 		fprintf(fp, "  \"boundary_alpha_band_hi_hz\": %.10g,\n", ac->alpha_band_hi);
 	}
+	/* 角度依存吸音 (opt-in) — 追加キーのみ。boundary_zeta は境界に実際に
+	 * 使った規格化インピーダンス (剛壁は 0)。off でも従来式の
+	 * Z/(rho c) が入るので、両モードの壁を同じ土俵で比べられる。 */
+	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
+	        ac->angle_dep ? "true" : "false");
+	fprintf(fp, "  \"boundary_zeta\": [%.10g, %.10g, %.10g, %.10g, %.10g, %.10g],\n",
+	        ac->wzeta[AC_XM], ac->wzeta[AC_XP], ac->wzeta[AC_YM],
+	        ac->wzeta[AC_YP], ac->wzeta[AC_ZM], ac->wzeta[AC_ZP]);
 	fprintf(fp, "  \"t_sabine_s\": %.10g,\n", ac->tsab);   /* -1 = A=0 (無限大) */
 	fprintf(fp, "  \"rigid_geometries\": %d,\n", ac->ngeom);
 	fprintf(fp, "  \"ofdx_sidecar\": %s\n", ac->have_ofdx ? "true" : "false");
