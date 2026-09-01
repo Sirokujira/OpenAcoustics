@@ -7,6 +7,11 @@
 # ── ofdx_acoustic_fdtd (低域担当、FDTD) の判定 :
 #  (a) 剛体閉箱 4x3x2.5 m の軸モード f_100/f_010/f_001 が ±3% (走査 DFT)
 #  (b) 準 1D 管の端面反射 R = sqrt(1-alpha) が ±3% (alpha=0.3, 0.9)
+#  (b3) 有効帯域外 (fmax より上) の alpha が RIR を変えない (バイト一致) —
+#      実効吸音率は [0, fmax] と重なるオクターブバンドだけの平均
+#  (i) 角度依存吸音 (opt-in) : Paris の逆解 zeta で境界を作り、垂直入射の
+#      R = (zeta-1)/(zeta+1) が ±3%。false 指定は既定とビット一致、
+#      alpha > 0.9512 はクランプ + warning
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
@@ -105,6 +110,17 @@ chkabs() {
 # ok <label> <条件の真偽 (0=真)> : grep 等の結果をそのまま判定にする
 say_ok() { printf "%-26s -> OK%s\n" "$1" "${2:-}"; }
 say_ng() { printf "%-26s -> NG%s\n" "$1" "${2:-}" >&2; status=1; }
+
+# paris_zeta <alpha_stat> : 局所反応境界の規格化インピーダンス zeta を
+# Paris の式 alpha_stat = (8/z^2)[z + 1 - 2 ln(1+z) - 1/(1+z)] から二分法で
+# 逆に解く (山 zeta = 1.5537 より右の枝 — 公表された閉形式の独立実装で、
+# ソルバーの C コードは使わない)。両ソルバーの角度依存吸音の判定が使う。
+paris_zeta() {
+	awk -v a="$1" 'function f(z) { return (8/(z*z))*(z + 1 - 2*log(1+z) - 1/(1+z)) }
+		BEGIN { lo = 1.5537; hi = 1e9;
+			for (i = 0; i < 200; i++) { m = 0.5*(lo+hi); if (f(m) > a) lo = m; else hi = m }
+			printf "%.10f", 0.5*(lo+hi) }'
+}
 
 # WAV の float32 サンプル列を 1 行 1 値で dump (44 byte 標準ヘッダ想定)
 dump() {
@@ -227,6 +243,75 @@ run_case tube_a09 tube_a09.ofd tube_a09.ofdx && {
 	chk "tube a=0.9 R (left)"  "${res% *}" 0.316227766 0.03   # sqrt(0.1)
 	chk "tube a=0.9 R (right)" "${res#* }" 0.316227766 0.03
 }
+
+echo "--- (b3) out-of-band alpha must not change the low-band RIR (bit-identical)"
+# FDTD は低域担当 (fmax = c/(10 dx))。実効吸音率は**有効帯域と重なるオクターブ
+# バンドだけ**の平均で、管では fc <= fmax*sqrt(2) = 970 Hz の 125/250/500 Hz。
+# tube_a03_oob は帯域外 (1k/2k/4k) の alpha だけが違う同一の管なので、
+# rir.wav はバイト単位で一致しなければならない (許容誤差を置かない厳密判定。
+# 6 バンド平均に潰す実装なら実効 alpha が 0.3667 対 0.64 になり必ず落ちる)。
+# metadata の使用バンド数もあわせて確認する (追加キー boundary_alpha*)。
+run_case tube_a03_oob tube_a03_oob.ofd tube_a03_oob.ofdx && {
+	if cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_a03_oob/rir.wav"; then
+		say_ok "out-of-band alpha ignored" " (rir.wav がビット一致)"
+	else
+		say_ng "out-of-band alpha ignored"
+	fi
+	chk "alpha bands used (tube)" \
+	    "$(awk -F: '/boundary_alpha_bands_used/ {gsub(/[ ,\r]/, "", $2); print $2}' \
+	       "$WORK/tube_a03/metadata.json")" 3 0.001
+	chk "alpha band hi (tube)" \
+	    "$(awk -F: '/boundary_alpha_band_hi_hz/ {gsub(/[ ,\r]/, "", $2); print $2}' \
+	       "$WORK/tube_a03/metadata.json")" 707.1067812 0.001
+	chk "effective alpha (tube)" \
+	    "$(awk '/boundary_alpha\"/ {gsub(/[^0-9.,]/, "", $0); split($0, v, ","); print v[1]}' \
+	       "$WORK/tube_a03/metadata.json")" 0.3 0.001
+}
+
+echo "--- (i) angle-dependent absorption (opt-in, Paris' inverse) (+-3%)"
+# acoustic.angle_dependent_absorption = true では吸音表の alpha を
+# **ランダム入射**として読み、Paris の式を逆に解いた zeta で境界を
+# Z = rho c zeta にする。局所反応境界の角度依存性 R(theta) は FDTD の
+# 境界更新から自動的に出るので、実装が決めるのは zeta だけ — 判定はそれが
+# そのまま出る垂直入射 (準 1D 管) で行う。導出は tube_angle.ofd を参照。
+#   alpha_stat = 0.3 -> zeta = 19.766 -> R(0) = (zeta-1)/(zeta+1) = 0.9037
+#   (既定動作なら sqrt(0.7) = 0.8367 で -7.4% — 許容の外)
+zeta03=$(paris_zeta 0.30)
+R_ang=$(awk -v z="$zeta03" 'BEGIN{printf "%.9f", (z - 1)/(z + 1)}')
+run_case tube_angle tube_angle.ofd tube_angle.ofdx && {
+	res=$(tube_R "$WORK/tube_angle" "$fs_tube")
+	chk "tube angle-dep R (left)"  "${res% *}" "$R_ang" 0.03
+	chk "tube angle-dep R (right)" "${res#* }" "$R_ang" 0.03
+	# 実際に境界へ入れた zeta (metadata の追加キー) が Paris の逆解と一致
+	chk "tube angle-dep zeta" \
+	    "$(awk '/boundary_zeta/ {gsub(/[^0-9.,]/, "", $0); split($0, v, ","); print v[1]}' \
+	       "$WORK/tube_angle/metadata.json")" "$zeta03" 0.001
+	ok_flag=$(grep -c "angle-dependent absorption" "$WORK/tube_angle/solver.log")
+	[ "$ok_flag" -ge 1 ] && say_ok "angle-dep logged" || say_ng "angle-dep logged"
+}
+# opt-in の確認 : false を明示した入力は既定 (キー無し) と rir.wav がバイト一致
+rm -rf "$WORK/tube_angle_off"; mkdir -p "$WORK/tube_angle_off"
+cp "$SRC/tube_a03.ofd" "$WORK/tube_angle_off/"
+sed 's/"angle_dependent_absorption": true/"angle_dependent_absorption": false/' \
+	"$SRC/tube_angle.ofdx" > "$WORK/tube_angle_off/tube_a03.ofdx"
+if "$SOLVER" "$WORK/tube_angle_off" > /dev/null 2>&1 &&
+   cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_angle_off/rir.wav"; then
+	say_ok "angle-dep opt-in" " (false 指定が既定とビット一致)"
+else
+	say_ng "angle-dep opt-in"
+fi
+# alpha > 0.9512 (局所反応の実インピーダンスで表せる上限) は正直にクランプ +
+# warning。完全吸音と偽らない (anechoic は alpha = 1)。
+rm -rf "$WORK/tube_angle_clamp"; mkdir -p "$WORK/tube_angle_clamp"
+cp "$SRC/anechoic.ofd" "$WORK/tube_angle_clamp/"
+sed 's/"acoustic": {/"acoustic": { "angle_dependent_absorption": true,/' \
+	"$SRC/anechoic.ofdx" > "$WORK/tube_angle_clamp/anechoic.ofdx"
+if "$SOLVER" "$WORK/tube_angle_clamp" > /dev/null 2>&1 &&
+   grep -q "warning: some alpha exceed" "$WORK/tube_angle_clamp/solver.log"; then
+	say_ok "angle-dep alpha clamp" " (alpha=1 を警告してクランプ)"
+else
+	say_ng "angle-dep alpha clamp"
+fi
 
 echo "--- (c) direct sound arrival t = t0 + r/c"
 # 全壁 alpha=1 の部屋で r=3.0 m。受音波形は s(t) の時間微分 (Ricker 型、
@@ -707,12 +792,7 @@ fi
 echo "--- (I) angle-dependent absorption of a locally reacting floor (+-1%)"
 # zeta は Paris の式 alpha_stat(zeta) = (8/zeta^2)[zeta+1-2ln(1+zeta)-1/(1+zeta)]
 # を二分法で逆に解く (published な閉形式の独立実装)。導出は ga_angle.ofd 参照。
-ga_zeta() {   # ga_zeta <alpha_stat>
-	awk -v a="$1" 'function f(z) { return (8/(z*z))*(z + 1 - 2*log(1+z) - 1/(1+z)) }
-		BEGIN { lo = 1.5537; hi = 1e9;
-			for (i = 0; i < 200; i++) { m = 0.5*(lo+hi); if (f(m) > a) lo = m; else hi = m }
-			printf "%.10f", 0.5*(lo+hi) }'
-}
+ga_zeta() { paris_zeta "$1"; }   # ga_zeta <alpha_stat> (実装は上部の共通ヘルパ)
 ga_run ga_angle ga_angle.ofd ga_angle.ofdx && {
 	d="$WORK/ga_angle"
 	dump "$d/rir.wav" > "$d/rir.txt"
@@ -735,6 +815,21 @@ ga_run ga_angle ga_angle.ofd ga_angle.ofdx && {
 			"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", sqrt(0.7)/(4*pi*r)}')" 0.01
 	else
 		say_ng "ga angle-indep sqrt(1-a)" " (solver failed)"
+	fi
+	# 対称性 : 同じ切り替えを acoustic 直下 (FDTD 側と共有するキー) に書いても
+	# 幾何音響は同じ壁で計算する — rir.wav がバイト一致。acoustic.ga 側の
+	# 同名キーがあればそちらが勝つ (既存入力の後方互換) ことも同時に効いている。
+	rm -rf "$WORK/ga_angle_top"; mkdir -p "$WORK/ga_angle_top"
+	cp "$SRC/ga_angle.ofd" "$WORK/ga_angle_top/"
+	sed -e 's/"scattering": 0.0,/"scattering": 0.0/' \
+	    -e 's/"angle_dependent_absorption": true//' \
+	    -e 's/"acoustic": {/"acoustic": { "angle_dependent_absorption": true,/' \
+		"$SRC/ga_angle.ofdx" > "$WORK/ga_angle_top/ga_angle.ofdx"
+	if "$GA_SOLVER" "$WORK/ga_angle_top" > /dev/null 2>&1 &&
+	   cmp -s "$d/rir.wav" "$WORK/ga_angle_top/rir.wav"; then
+		say_ok "ga angle-dep top-level key" " (acoustic 直下でもビット一致)"
+	else
+		say_ng "ga angle-dep top-level key"
 	fi
 }
 

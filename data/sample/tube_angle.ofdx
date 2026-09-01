@@ -1,6 +1,7 @@
 {
   "schemaVersion": "1.0",
   "acoustic": {
+    "angle_dependent_absorption": true,
     "absorption": [
       { "enabled": false, "role": 3, "name": "disabled row (must be ignored)", "area": 0.0025, "alpha": [0.99, 0.99, 0.99, 0.99, 0.99, 0.99], "air_a": 0.0 },
       { "enabled": true, "role": 3, "name": "tube ends (in-band 125/250/500 Hz = 0.3)", "area": 0.0025, "alpha": [0.3, 0.3, 0.3, 0.4, 0.4, 0.5], "air_a": 0.0 },

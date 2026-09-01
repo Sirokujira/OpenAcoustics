@@ -123,7 +123,12 @@ int main(int argc, char **argv)
 	int i, nargs = 0;
 
 	memset(&ac, 0, sizeof(ac));
-	for (i = 0; i < AC_NWALL; i++) ac.alpha[i] = AC_ALPHA_DEFAULT;
+	/* 吸音率の既定値はバンド別配列に置く (.ofdx が無い/該当 role が無い壁)。
+	 * 境界に使う実効値 ac.alpha[] は fmax が決まる ac_setup が選ぶ。 */
+	for (i = 0; i < AC_NWALL; i++) {
+		int b;
+		for (b = 0; b < AC_NBAND_OFDX; b++) ac.alpha_bands[i][b] = AC_ALPHA_DEFAULT;
+	}
 
 	/* 引数 : "-" で始まるものは無視 (ランチャ由来のオプションを許容) */
 	for (i = 1; i < argc; i++) {

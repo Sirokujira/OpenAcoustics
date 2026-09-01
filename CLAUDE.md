@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 130 判定 (FDTD 50 + 幾何音響 80)。1 本のスクリプトが
+# 検証 : 解析解との比較 141 判定 (FDTD 60 + 幾何音響 81)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**130 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**141 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -85,6 +85,27 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
    離散系はエネルギー保存する。境界更新に散逸を持ち込むと (d) が落ちる。
 3. **インピーダンス境界 R = √(1−α)**: Z = ρc(1+√(1−α))/(1−√(1−α))。
    α→0 は剛壁に厳密一致、α→1 は Z→ρc (無反射)。tube ケース (±3%) が番人。
+3b. **実効吸音率は有効帯域内のバンドだけから決める**: `.ofdx` の
+   alpha[6] (125 Hz〜4 kHz) のうち、範囲 [fc/√2, fc·√2] が有効帯域
+   [0, fmax = c/(10·dx)] と重なるバンド (fc ≤ fmax·√2) だけを平均して
+   境界の 1 値にする。重なるバンドが無い (fmax < 88.4 Hz) 場合のみ 125 Hz の
+   値。低域担当のソルバーが 4 kHz の吸音率まで混ぜると壁が別物になり、
+   バンド別に使う幾何音響側とのクロスオーバー整合 (ADR-0008) も崩れる。
+   番人は (b3) — 帯域外の α だけが違う入力で rir.wav が**バイト一致**。
+   metadata の `boundary_alpha_bands` / `_bands_used` / `_band_hi_hz` は
+   その根拠 (追加キーのみ)。
+3c. **角度依存吸音は opt-in で、両ソルバー対称**: `.ofdx` の
+   `acoustic.angle_dependent_absorption` (既定 false = 従来どおり α を
+   垂直入射として読む R = √(1−α))。true では α を**ランダム入射**として
+   読み、Paris の逆解 ζ で Z = ρc·ζ にする (幾何音響側 ga_setup.c と
+   同じ式・同じ枝 — 別バイナリなので実装は共有しないが、**片方だけ
+   変えない**)。FDTD の局所反応境界は R(θ) = (ζcosθ−1)/(ζcosθ+1) を
+   離散化から自動的に持つので、決めるのは ζ だけ。α > 0.9512 (局所反応の
+   実インピーダンスで表せる上限) はクランプして warning (完全吸音と
+   偽らない)。キーを `acoustic` 直下に置くのは両ソルバーが読むため
+   (`acoustic.ga` 側の同名キーがあれば幾何音響ではそちらが優先)。
+   番人は (i) — 垂直入射の R が Paris の逆解と ±3%、false 指定は既定と
+   rir.wav がバイト一致、(I) の追加判定で GA も同じキーを読む。
 4. **決定性**: 乱数不使用。OpenMP 並列 (p 更新・v 更新のセルループ) は
    リダクションを持たず、スレッド数によらず**ビット単位で一致** (OpenPEEC と
    同じ原則)。リダクションを持つ並列化を足すと (e) が落ちる。その場合は

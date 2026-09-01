@@ -3,7 +3,7 @@
   "acoustic": {
     "absorption": [
       { "enabled": false, "role": 3, "name": "disabled row (must be ignored)", "area": 0.0025, "alpha": [0.99, 0.99, 0.99, 0.99, 0.99, 0.99], "air_a": 0.0 },
-      { "enabled": true, "role": 3, "name": "tube ends (in-band 125/250/500 Hz = 0.3)", "area": 0.0025, "alpha": [0.3, 0.3, 0.3, 0.4, 0.4, 0.5], "air_a": 0.0 },
+      { "enabled": true, "role": 3, "name": "tube ends (same in-band 0.3, extreme out-of-band)", "area": 0.0025, "alpha": [0.3, 0.3, 0.3, 0.95, 0.99, 1.0], "air_a": 0.0 },
       { "enabled": true, "role": 1, "name": "Ceiling",  "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
       { "enabled": true, "role": 2, "name": "SideWall", "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 },
       { "enabled": true, "role": 4, "name": "Floor",    "area": 0.4, "alpha": [0, 0, 0, 0, 0, 0], "air_a": 0.0 }
