@@ -14,6 +14,9 @@
 #      alpha > 0.9512 はクランプ + warning
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
+#  (v) 非直方体の geometry : 13 種の shape のボクセル体積が解析値と ±5%、
+#      重心 ±dx/2、外接範囲 ±2dx。外接箱の内側・形状の外の受音点が通り、
+#      形状の中の受音点は形状を名指しして拒否される
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
 #  (h) 複数音源 (multi_source) : 2 feed の同時発火が各 feed 単独の和に一致
@@ -337,16 +340,117 @@ run_case box_pillar box_pillar.ofd && {
 	grep -q "normal end" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "box_pillar normal end" \
 		|| { printf "%-26s -> NG\n" "box_pillar normal end" >&2; status=1; }
-	# 複数 feed の warning と AABB 近似の warning が明示されること (v1 仕様)
+	# 複数 feed の warning が明示されること (v1 仕様)。円柱 (shape 13) は
+	# 外接箱で近似せず形状どおりにボクセル化され、その結果がログに出る
+	# (形状の精度そのものは下の (v) で解析値と比べる)。
 	grep -q "warning: 2 feeds" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "multi-feed warning" \
 		|| { printf "%-26s -> NG\n" "multi-feed warning" >&2; status=1; }
-	grep -q "AABB" "$d/solver.log" \
-		&& printf "%-26s -> OK\n" "AABB approx warning" \
-		|| { printf "%-26s -> NG\n" "AABB approx warning" >&2; status=1; }
+	if grep -q "voxelizer: geometry #2 shape 13 -> 40 cells" "$d/solver.log" &&
+	   ! grep -q "AABB" "$d/solver.log"; then
+		say_ok "exact voxelization log"
+	else
+		say_ng "exact voxelization log"
+	fi
 	# 吸音表なし -> 既定 alpha=0.1 の 6 面から T_Sabine = 0.409 s (導出は .ofd)
 	chk "default-alpha T_Sabine" "$(awk -F: '/t_sabine_s/ {gsub(/[ ,\r]/, "", $2); print $2}' "$d/metrics.json")" 0.4093 0.01
 }
+
+echo "--- (v) exact voxelization of every shape (volume +-5%, centroid +-dx/2)"
+# 本家 OpenFDTD の 13 種の shape を形状どおりに剛体化すること。期待値は
+# .ofd の geometry 行から下の awk が**解析的に**計算する (楕円体 pi/6 LxLyLz、
+# 円柱 pi/4 LxLyLz、三角柱 L*面積、錐台 L*int a b dt — 導出・許容の根拠は
+# voxel_shapes.ofd)。ソルバーの内外判定は使わない。
+vox_expect() {   # vox_expect <ofd> : 1 行 1 形状 "shape V cx cy cz wx wy wz"
+	awk 'function ab(x) { return (x < 0) ? -x : x }
+		function mx(a, b) { return (a > b) ? a : b }
+		function mn(a, b) { return (a < b) ? a : b }
+		BEGIN { PI = atan2(0, -1) }
+		/^geometry *=/ {
+			line = $0; sub(/^geometry *= */, "", line)
+			n = split(line, f, /[ \t]+/); s = f[2] + 0
+			for (i = 0; i < 8; i++) g[i] = (i + 3 <= n) ? f[i + 3] + 0 : 0
+			if (s == 1 || s == 2 || (s >= 11 && s <= 13)) {
+				for (a = 0; a < 3; a++) {
+					w[a] = ab(g[2*a + 1] - g[2*a]); c[a] = (g[2*a] + g[2*a + 1]) / 2
+				}
+				V = w[0] * w[1] * w[2] * ((s == 1) ? 1 : (s == 2) ? PI / 6 : PI / 4)
+			} else if (s >= 31 && s <= 33) {
+				ax = s - 31; u = (ax + 1) % 3; v = (ax + 2) % 3
+				w[ax] = ab(g[1] - g[0]); c[ax] = (g[0] + g[1]) / 2
+				c[u] = (g[2] + g[3] + g[4]) / 3; c[v] = (g[5] + g[6] + g[7]) / 3
+				w[u] = mx(mx(g[2], g[3]), g[4]) - mn(mn(g[2], g[3]), g[4])
+				w[v] = mx(mx(g[5], g[6]), g[7]) - mn(mn(g[5], g[6]), g[7])
+				V = w[ax] * ab((g[3] - g[2]) * (g[7] - g[5]) - (g[6] - g[5]) * (g[4] - g[2])) / 2
+			} else {
+				ax = (s % 10) - 1; u = (ax + 1) % 3; v = (ax + 2) % 3
+				L = g[1] - g[0]; a1 = g[4]; b1 = g[5]; da = g[6] - a1; db = g[7] - b1
+				I0 = a1 * b1 + (a1 * db + b1 * da) / 2 + da * db / 3
+				I1 = a1 * b1 / 2 + (a1 * db + b1 * da) / 3 + da * db / 4
+				V = ab(L) * I0 * ((s < 50) ? 1 : PI / 4)
+				c[ax] = g[0] + L * I1 / I0; c[u] = g[2]; c[v] = g[3]
+				w[ax] = ab(L); w[u] = mx(a1, g[6]); w[v] = mx(b1, g[7])
+			}
+			printf "%d %.10g %.10g %.10g %.10g %.10g %.10g %.10g\n", s, V, c[0], c[1], c[2], w[0], w[1], w[2]
+		}' "$1"
+}
+vox_actual() {   # vox_actual <metadata.json> : "shape cells V cx cy cz x1 x2 y1 y2 z1 z2"
+	awk '/"geometry_voxels"/ { on = 1; next }
+		on && /\]/ && !/"shape"/ { on = 0 }
+		on && /"shape"/ { l = $0; gsub(/"[a-z_0-9]+":/, "", l); gsub(/[][{},]/, " ", l)
+			$0 = l; $1 = $1; print }' "$1"
+}
+# (v-a) 形状の精度 : 受音点 #1〜#4 を外した入力で測る (受音点の受理と切り離し、
+# 形状の誤りが体積・重心・外接範囲のずれとして必ず読めるようにする)
+rm -rf "$WORK/voxel_vol"; mkdir -p "$WORK/voxel_vol"
+sed -e '/^point = z 0.125 0.175 0.125$/d' -e '/^point = z 1.125 0.175 0.125$/d' \
+    -e '/^point = z 1.525 0.375 0.125$/d' -e '/^point = z 2.225 0.175 0.475$/d' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_vol/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_vol/"
+if "$SOLVER" "$WORK/voxel_vol" > /dev/null 2> "$WORK/voxel_vol/stderr.log"; then
+	d="$WORK/voxel_vol"
+	vox_expect "$SRC/voxel_shapes.ofd" > "$d/vox_expect.txt"
+	vox_actual "$d/metadata.json" > "$d/vox_actual.txt"
+	paste -d ' ' "$d/vox_expect.txt" "$d/vox_actual.txt" > "$d/vox_pair.txt"
+	[ "$(wc -l < "$d/vox_pair.txt")" -eq 13 ] || say_ng "voxel shape count" " ($(wc -l < "$d/vox_pair.txt") lines)"
+	while read -r line; do
+		echo "$line" | awk '{
+			s = $1; Ve = $2; Va = $11; dv = (Va - Ve) / Ve; adv = (dv < 0) ? -dv : dv
+			dc = 0; dw = 0
+			for (a = 0; a < 3; a++) {
+				e = $(3 + a) - $(12 + a); if (e < 0) e = -e; if (e > dc) dc = e
+				e = $(6 + a) - ($(16 + 2*a) - $(15 + 2*a)); if (e < 0) e = -e; if (e > dw) dw = e
+			}
+			ok = (adv <= 0.05 && dc <= 0.025 && dw <= 0.1 && $9 == s)
+			printf "%-26s V=%.5f expected=%.5f %+.2f%%, |dc|<=%.3f |dw|<=%.3f m -> %s\n",
+			       sprintf("voxel shape %d", s), Va, Ve, dv * 100, dc, dw, ok ? "OK" : "NG"
+			exit ok ? 0 : 1 }' || status=1
+	done < "$d/vox_pair.txt"
+else
+	say_ng "voxel shapes run" " ($(head -1 "$WORK/voxel_vol/stderr.log"))"
+fi
+# (v-b) 受音点 #1〜#4 は外接箱の内側だが形状の外 (#2〜#4 は円柱の軸を取り
+# 違えると形状の中になる位置)。正常終了 = 形状どおりに判定されている。
+rm -rf "$WORK/voxel_shapes"; mkdir -p "$WORK/voxel_shapes"
+cp "$SRC/voxel_shapes.ofd" "$SRC/voxel_shapes.ofdx" "$WORK/voxel_shapes/"
+if "$SOLVER" "$WORK/voxel_shapes" > /dev/null 2> "$WORK/voxel_shapes/stderr.log" &&
+   grep -q "normal end" "$WORK/voxel_shapes/solver.log"; then
+	say_ok "voxel AABB-only points" " (外接箱の隅の受音点 4 点を受理)"
+else
+	say_ng "voxel AABB-only points" " ($(head -1 "$WORK/voxel_shapes/stderr.log"))"
+fi
+# 形状の中の受音点は (外接箱ではなく) 形状の判定で拒否され、どの形状かを名指しする
+rm -rf "$WORK/voxel_inside"; mkdir -p "$WORK/voxel_inside"
+sed 's/^point = z 0.125 0.175 0.125$/point = z 0.425 0.425 0.375/' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_inside/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_inside/"
+if "$SOLVER" "$WORK/voxel_inside" > /dev/null 2> "$WORK/voxel_inside/stderr.log"; then
+	say_ng "voxel inside-point exit" " (accepted a point inside the ellipsoid)"
+elif grep -q "inside rigid geometry #1 (shape 2)" "$WORK/voxel_inside/stderr.log"; then
+	say_ok "voxel inside-point exit" " (refused, names geometry #1)"
+else
+	say_ng "voxel inside-point exit" " (no reason on stderr)"
+fi
 
 echo "--- (e) determinism (bit-identical reruns and thread invariance)"
 # 乱数不使用。OpenMP 並列 (p 更新・v 更新のセルループ) はリダクションを

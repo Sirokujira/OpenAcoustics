@@ -21,8 +21,11 @@
  *   遅延 t0 = 5σ (t=0 での振幅は 5·e^{-12} ≈ 3e-5 — 立ち上がり誤差は無視できる)。
  *
  * 剛体 (geometry) : セル中心が形状内にあるセルを剛体とし、剛体に接する面の
- *   法線速度を 0 に固定する (面マスク)。shape 1 (直方体) は厳密、他の shape は
- *   AABB (軸平行境界箱) 近似で warning を出す。
+ *   法線速度を 0 に固定する (面マスク)。本家 OpenFDTD の全 shape (直方体 1、
+ *   楕円体 2、円柱 11-13、三角柱 31-33、角錐台 41-43、円錐台 51-53) を
+ *   それぞれの形状の内外判定でボクセル化する (外接箱で近似しない)。
+ *   パラメータの並びは本家 sol/ingeometry.c (OpenFDTD-X core/Geometry.h が
+ *   正) と同じ。未知の shape は warning を出して無視する。
  *
  * 外壁境界 (局所反応インピーダンス) :
  *   Z = ρc·(1+√(1-α))/(1-√(1-α))。これは平面波の圧力反射係数
@@ -99,18 +102,129 @@ static int geom_aabb(const ac_geom_t *g, double lo[3], double hi[3])
 	}
 }
 
-/* 点を含む剛体形状の番号 (0 起点。無ければ -1)。エラーメッセージ用 —
- * ボクセル化と同じ AABB 判定を使う (形状の近似も含めて実際に剛体になった
- * 領域と一致させるため)。 */
-static int geom_containing(const ac_t *ac, double x, double y, double z)
+/* 点 q = (x, y, z) が形状の内部 (境界を含む) か。外接箱 (geom_aabb) の
+ * 内側であることは呼び出し側が保証する。軸付き形状の断面 2 軸は
+ * u = (軸+1)%3, w = (軸+2)%3 (本家 ingeometry.c の (u,v) 順)。
+ *   2      楕円体   : 外接箱に内接 — sum ((q-c)/r)^2 <= 1
+ *   11-13  円柱     : 軸 = shape-11、断面は外接箱に内接する楕円
+ *   31-33  三角柱   : 軸 = shape-31、軸範囲 g[0..1]、断面の頂点
+ *                     (g[2+k], g[5+k]) k = 0..2 (向きは問わない)
+ *   41-43  角錐台   : 軸 = shape%10-1、軸範囲 g[0..1]、断面中心 (g[2], g[3])、
+ *   51-53  円錐台     g[0] 側の全幅 (g[4], g[5])、g[1] 側の全幅 (g[6], g[7])
+ *                     — 間は線形補間。角錐は矩形、円錐は楕円の断面
+ * 退化した形状 (半径 0・軸長 0・面積 0) は内部を持たない。 */
+static int geom_inside(const ac_geom_t *g, double x, double y, double z)
+{
+	const double *p = g->g;
+	double q[3];
+	q[0] = x; q[1] = y; q[2] = z;
+	switch (g->shape) {
+		case 1:
+			return 1;                      /* 外接箱そのもの */
+		case 2: {
+			double sum = 0.0;
+			int a;
+			for (a = 0; a < 3; a++) {
+				double c = 0.5 * (p[2*a] + p[2*a + 1]);
+				double r = 0.5 * fabs(p[2*a + 1] - p[2*a]);
+				if (r <= 0.0) return 0;
+				sum += ((q[a] - c) / r) * ((q[a] - c) / r);
+			}
+			return sum <= 1.0;
+		}
+		case 11: case 12: case 13: {
+			int ax = g->shape - 11, a;
+			double sum = 0.0;
+			for (a = 0; a < 3; a++) {
+				double c, r;
+				if (a == ax) continue;         /* 軸方向は外接箱の範囲だけ */
+				c = 0.5 * (p[2*a] + p[2*a + 1]);
+				r = 0.5 * fabs(p[2*a + 1] - p[2*a]);
+				if (r <= 0.0) return 0;
+				sum += ((q[a] - c) / r) * ((q[a] - c) / r);
+			}
+			return sum <= 1.0;
+		}
+		case 31: case 32: case 33: {
+			int ax = g->shape - 31;
+			int u = (ax + 1) % 3, w = (ax + 2) % 3, k;
+			double area2 = (p[3] - p[2]) * (p[7] - p[5])
+			             - (p[6] - p[5]) * (p[4] - p[2]);
+			int neg = 0, pos = 0;
+			if (area2 == 0.0) return 0;
+			for (k = 0; k < 3; k++) {          /* 3 辺の外積の符号がそろうか */
+				int k2 = (k + 1) % 3;
+				double cr = (p[2+k2] - p[2+k]) * (q[w] - p[5+k])
+				          - (p[5+k2] - p[5+k]) * (q[u] - p[2+k]);
+				if (cr < 0.0) neg = 1;
+				if (cr > 0.0) pos = 1;
+			}
+			return !(neg && pos);
+		}
+		case 41: case 42: case 43:
+		case 51: case 52: case 53: {
+			int ax = (g->shape % 10) - 1;
+			int u = (ax + 1) % 3, w = (ax + 2) % 3;
+			double len = p[1] - p[0], t, hu, hw, du, dw;
+			if (len == 0.0) return 0;
+			t = (q[ax] - p[0]) / len;
+			if (t < 0.0 || t > 1.0) return 0;
+			hu = 0.5 * (p[4] + (p[6] - p[4]) * t);
+			hw = 0.5 * (p[5] + (p[7] - p[5]) * t);
+			du = q[u] - p[2];
+			dw = q[w] - p[3];
+			if (g->shape < 50)                 /* 角錐台 : 矩形断面 */
+				return fabs(du) <= hu && fabs(dw) <= hw;
+			if (hu <= 0.0 || hw <= 0.0) return 0;   /* 円錐台 : 楕円断面 */
+			return (du / hu) * (du / hu) + (dw / hw) * (dw / hw) <= 1.0;
+		}
+		default:
+			return 0;
+	}
+}
+
+/* 形状の外接箱と重なるセル番号の範囲 (セル中心が箱の中)。戻り値 0 = 未知の
+ * shape か、格子と重ならない。shape 1 はこの範囲がそのまま剛体になる
+ * (従来と同じ ceil/floor — 既存入力のボクセル化はビット単位で不変)。 */
+static int geom_irange(const ac_t *ac, const ac_geom_t *g, int r[6])
 {
 	double lo[3], hi[3];
-	int n;
+	if (!geom_aabb(g, lo, hi)) return 0;
+	r[0] = (int)ceil((lo[0] - ac->x0) / ac->dx - 0.5);
+	r[1] = (int)floor((hi[0] - ac->x0) / ac->dx - 0.5);
+	r[2] = (int)ceil((lo[1] - ac->y0) / ac->dx - 0.5);
+	r[3] = (int)floor((hi[1] - ac->y0) / ac->dx - 0.5);
+	r[4] = (int)ceil((lo[2] - ac->z0) / ac->dx - 0.5);
+	r[5] = (int)floor((hi[2] - ac->z0) / ac->dx - 0.5);
+	if (r[0] < 0) r[0] = 0;
+	if (r[2] < 0) r[2] = 0;
+	if (r[4] < 0) r[4] = 0;
+	if (r[1] > ac->nx - 1) r[1] = ac->nx - 1;
+	if (r[3] > ac->ny - 1) r[3] = ac->ny - 1;
+	if (r[5] > ac->nz - 1) r[5] = ac->nz - 1;
+	return 1;
+}
+
+/* 形状 g がセル (i, j, k) を剛体にするか (ボクセル化の唯一の規則) */
+static int geom_marks(const ac_t *ac, const ac_geom_t *g, const int r[6],
+                      int i, int j, int k)
+{
+	if (i < r[0] || i > r[1] || j < r[2] || j > r[3] || k < r[4] || k > r[5])
+		return 0;
+	if (g->shape == 1) return 1;
+	return geom_inside(g, ac->x0 + (i + 0.5) * ac->dx,
+	                      ac->y0 + (j + 0.5) * ac->dx,
+	                      ac->z0 + (k + 0.5) * ac->dx);
+}
+
+/* セルを剛体にした形状の番号 (0 起点。無ければ -1)。エラーメッセージ用 —
+ * ボクセル化と同じ規則 (geom_marks) を使うので、剛体判定とずれない。 */
+static int geom_containing(const ac_t *ac, int i, int j, int k)
+{
+	int n, r[6];
 	for (n = 0; n < ac->ngeom; n++) {
-		if (!geom_aabb(&ac->geom[n], lo, hi)) continue;
-		if (x >= lo[0] && x <= hi[0] && y >= lo[1] && y <= hi[1] &&
-		    z >= lo[2] && z <= hi[2])
-			return n;
+		if (!geom_irange(ac, &ac->geom[n], r)) continue;
+		if (geom_marks(ac, &ac->geom[n], r, i, j, k)) return n;
 	}
 	return -1;
 }
@@ -421,36 +535,64 @@ int ac_setup(ac_t *ac)
 		return 1;
 	}
 
-	/* ── 剛体ボクセル化 (セル中心が形状内 → 剛体) ── */
+	/* ── 剛体ボクセル化 (セル中心が形状内 → 剛体) ──
+	 * 外接箱と重なる範囲だけを走査し、各セル中心を形状の内外判定にかける。
+	 * 形状ごとのセル数・重心・外接範囲を記録する (solver.log / metadata)。 */
+	if (ac->ngeom > 0) {
+		ac->gvox = (ac_gvox_t *)calloc((size_t)ac->ngeom, sizeof(ac_gvox_t));
+		if (!ac->gvox) {
+			ac_err(ac, "out of memory (%d geometries)", ac->ngeom);
+			return 1;
+		}
+	}
 	for (n = 0; n < ac->ngeom; n++) {
-		double lo[3], hi[3];
-		int i0, i1, j0, j1, k0, k1;
-		if (!geom_aabb(&ac->geom[n], lo, hi)) {
-			ac_log(ac, "warning: geometry #%d has unknown shape %d — ignored",
-			       n + 1, ac->geom[n].shape);
+		const ac_geom_t *g = &ac->geom[n];
+		ac_gvox_t *gv = &ac->gvox[n];
+		int r[6];
+		double sx = 0.0, sy = 0.0, sz = 0.0;
+		long ilo = nx, ihi = -1, jlo = ny, jhi = -1, klo = nz, khi = -1;
+		if (!geom_irange(ac, g, r)) {
+			if (!geom_aabb(g, gv->lo, gv->hi))
+				ac_log(ac, "warning: geometry #%d has unknown shape %d — ignored",
+				       n + 1, g->shape);
 			continue;
 		}
-		if (ac->geom[n].shape != 1)
-			ac_log(ac, "warning: geometry #%d shape %d approximated by its "
-			       "AABB (only shape 1 = box is voxelized exactly in v1)",
-			       n + 1, ac->geom[n].shape);
-		/* AABB とセル中心格子の重なり範囲だけ走査 */
-		i0 = (int)ceil((lo[0] - ac->x0) / ac->dx - 0.5);
-		i1 = (int)floor((hi[0] - ac->x0) / ac->dx - 0.5);
-		j0 = (int)ceil((lo[1] - ac->y0) / ac->dx - 0.5);
-		j1 = (int)floor((hi[1] - ac->y0) / ac->dx - 0.5);
-		k0 = (int)ceil((lo[2] - ac->z0) / ac->dx - 0.5);
-		k1 = (int)floor((hi[2] - ac->z0) / ac->dx - 0.5);
-		if (i0 < 0) i0 = 0;
-		if (j0 < 0) j0 = 0;
-		if (k0 < 0) k0 = 0;
-		if (i1 > nx - 1) i1 = nx - 1;
-		if (j1 > ny - 1) j1 = ny - 1;
-		if (k1 > nz - 1) k1 = nz - 1;
-		for (k = k0; k <= k1; k++)
-			for (j = j0; j <= j1; j++)
-				for (i = i0; i <= i1; i++)
+		for (k = r[4]; k <= r[5]; k++)
+			for (j = r[2]; j <= r[3]; j++)
+				for (i = r[0]; i <= r[1]; i++) {
+					if (!geom_marks(ac, g, r, i, j, k)) continue;
 					ac->solid[((size_t)k * ny + j) * nx + i] = 1;
+					gv->ncell++;
+					sx += i; sy += j; sz += k;
+					if (i < ilo) ilo = i;
+					if (i > ihi) ihi = i;
+					if (j < jlo) jlo = j;
+					if (j > jhi) jhi = j;
+					if (k < klo) klo = k;
+					if (k > khi) khi = k;
+				}
+		if (gv->ncell > 0) {
+			gv->cen[0] = ac->x0 + (sx / gv->ncell + 0.5) * ac->dx;
+			gv->cen[1] = ac->y0 + (sy / gv->ncell + 0.5) * ac->dx;
+			gv->cen[2] = ac->z0 + (sz / gv->ncell + 0.5) * ac->dx;
+			gv->lo[0] = ac->x0 + ilo * ac->dx;  gv->hi[0] = ac->x0 + (ihi + 1) * ac->dx;
+			gv->lo[1] = ac->y0 + jlo * ac->dx;  gv->hi[1] = ac->y0 + (jhi + 1) * ac->dx;
+			gv->lo[2] = ac->z0 + klo * ac->dx;  gv->hi[2] = ac->z0 + (khi + 1) * ac->dx;
+		}
+		else {
+			int a;
+			for (a = 0; a < 3; a++) gv->cen[a] = gv->lo[a] = gv->hi[a] = 0.0;
+		}
+		ac_log(ac, "voxelizer: geometry #%d shape %d -> %ld cells "
+		       "(%.6g m^3), centroid (%.4g, %.4g, %.4g) m, extent "
+		       "[%.4g, %.4g] x [%.4g, %.4g] x [%.4g, %.4g] m", n + 1, g->shape,
+		       gv->ncell, gv->ncell * ac->dx * ac->dx * ac->dx,
+		       gv->cen[0], gv->cen[1], gv->cen[2],
+		       gv->lo[0], gv->hi[0], gv->lo[1], gv->hi[1], gv->lo[2], gv->hi[2]);
+		if (gv->ncell == 0)
+			ac_log(ac, "warning: geometry #%d (shape %d) covers no cell center "
+			       "— it has no effect at dx = %g m (thinner than the grid or "
+			       "outside the domain)", n + 1, g->shape, ac->dx);
 	}
 	{
 		size_t c2, nsolid = 0;
@@ -507,7 +649,7 @@ int ac_setup(ac_t *ac)
 		int js = snap_cell(sy, ac->y0, ac->dx, ny);
 		int ks = snap_cell(sz, ac->z0, ac->dx, nz);
 		if (ac->solid[((size_t)ks * ny + js) * nx + is]) {
-			int gi = geom_containing(ac, sx, sy, sz);
+			int gi = geom_containing(ac, is, js, ks);
 			if (gi >= 0)
 				ac_err(ac, "feed #%d position (%.4g, %.4g, %.4g) is inside "
 				       "rigid geometry #%d (shape %d) — move the source out "
@@ -539,7 +681,7 @@ int ac_setup(ac_t *ac)
 		if (ac->solid[((size_t)r->kc * ny + r->jc) * nx + r->ic]) {
 			/* 剛体内の受音点は測れない。どの形状に入っているかと、
 			 * 典型的な直し方 (耳の高さへ上げる) を添えて失敗する。 */
-			int gi = geom_containing(ac, r->x, r->y, r->z);
+			int gi = geom_containing(ac, r->ic, r->jc, r->kc);
 			if (gi >= 0)
 				ac_err(ac, "point #%d (%.4g, %.4g, %.4g) is inside rigid "
 				       "geometry #%d (shape %d) — move it out of the object, "
@@ -743,6 +885,7 @@ int ac_run(ac_t *ac)
 void ac_free(ac_t *ac)
 {
 	free(ac->geom);  ac->geom = NULL;
+	free(ac->gvox);  ac->gvox = NULL;
 	free(ac->feedpos); ac->feedpos = NULL;
 	free(ac->srccell); ac->srccell = NULL;
 	free(ac->srcgain); ac->srcgain = NULL;

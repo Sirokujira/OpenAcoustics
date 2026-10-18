@@ -45,9 +45,18 @@ enum { AC_XM = 0, AC_XP, AC_YM, AC_YP, AC_ZM, AC_ZP, AC_NWALL };
 /* ── 入力要素 ──────────────────────────────────────────────────── */
 
 typedef struct {
-	int    shape;      /* .ofd の shape (1=直方体は厳密、他は AABB 近似) */
+	int    shape;      /* .ofd の shape (1/2/11-13/31-33/41-43/51-53 を厳密に扱う) */
 	double g[8];       /* shape パラメータ (本家 sol/ingeometry.c と同一) */
 } ac_geom_t;
+
+/* 形状ごとのボクセル化結果 (setup で決定。solver.log と metadata.json に出す)。
+ * 実際に剛体になった領域を数字で示す — 形状定義の誤り (軸の取り違え等) は
+ * 体積・重心・外接範囲の解析値とのずれとして検証 (v) で見える。 */
+typedef struct {
+	long   ncell;      /* この形状が剛体にしたセル数 (他形状との重なりも数える) */
+	double cen[3];     /* そのセル中心の平均 [m] (ncell = 0 なら 0) */
+	double lo[3], hi[3]; /* そのセル群の外接範囲 (セル面) [m] */
+} ac_gvox_t;
 
 typedef struct {
 	char   name[AC_NAME_MAX];   /* .ofd point 行の "# 名前" (空可) */
@@ -76,6 +85,7 @@ typedef struct {
 	int        nonuniform;             /* 非一様メッシュだったか (警告用) */
 	ac_geom_t *geom;
 	int        ngeom;
+	ac_gvox_t *gvox;                   /* ngeom 要素 (setup で確保、ac_free で解放) */
 	double     srcx, srcy, srcz;       /* feed #1 の位置 (metadata の source 用) */
 	double    *feedpos;                /* 全 feed の座標 (3 * nfeed) */
 	int        nfeed;
