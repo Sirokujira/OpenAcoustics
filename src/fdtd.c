@@ -26,6 +26,10 @@
  *   それぞれの形状の内外判定でボクセル化する (外接箱で近似しない)。
  *   パラメータの並びは本家 sol/ingeometry.c (OpenFDTD-X core/Geometry.h が
  *   正) と同じ。未知の shape は warning を出して無視する。
+ *   .ofdx の acoustic.obstacles[] で材質 (吸音率) を持つ障害物は、流体との
+ *   界面を外壁と同じ半陰的インピーダンス更新にする (係数は bnd_coeffs を
+ *   外壁と共有。面と最寄りの p 節点の間は外壁と同じ半セル)。材質なしの
+ *   障害物の面はマスクで v ≡ 0 (剛体、厳密に無損失)。
  *
  * 外壁境界 (局所反応インピーダンス) :
  *   Z = ρc·(1+√(1-α))/(1-√(1-α))。これは平面波の圧力反射係数
@@ -324,12 +328,42 @@ static double ac_zeta_from_alpha(double alpha_stat)
 	return 0.5 * (lo + hi);
 }
 
+/* 実効吸音率 a から境界係数を作る (外壁と障害物の面で共通 — 同じ式で
+ * なければ「吸音率 a の障害物の面 = 吸音率 a の外壁」が崩れる)。
+ * 戻り値 1 = 剛 (更新しない — 厳密に無損失)。 */
+static int bnd_coeffs(const ac_t *ac, double a, double *Zo, double *A,
+                      double *B, double *zeta)
+{
+	const double c = AC_C0, rho = AC_RHO0;
+	double Z, ma;
+	if (a < 1e-6) {
+		*Zo = *A = *B = *zeta = 0.0;
+		return 1;
+	}
+	ma = rho * ac->dx / (2.0 * ac->dt);
+	if (ac->angle_dep) {
+		double amax = ac_alpha_stat(ac_zeta_from_alpha(2.0));
+		*zeta = ac_zeta_from_alpha((a > amax) ? amax : a);
+		Z = rho * c * *zeta;
+	}
+	else {
+		double s = sqrt(1.0 - ((a > 1.0) ? 1.0 : a));
+		Z = rho * c * (1.0 + s) / (1.0 - s + 1e-300);
+		*zeta = Z / (rho * c);
+	}
+	*Zo = Z;
+	*A = (ma - Z / 2.0) / (ma + Z / 2.0);
+	*B = 1.0 / (ma + Z / 2.0);
+	return 0;
+}
+
 int ac_setup(ac_t *ac)
 {
 	const double c = AC_C0, rho = AC_RHO0;
 	double lx, ly, lz, vol, area, tsolve;
 	long long cells;
 	size_t np, nvx, nvy, nvz;
+	unsigned short *gown = NULL;   /* 剛体セル → 形状番号+1 (吸音性の障害物があるときだけ) */
 	int i, j, k, n, w;
 	int nx, ny, nz;
 
@@ -396,6 +430,24 @@ int ac_setup(ac_t *ac)
 			ac_log(ac, "absorption: warning: fmax = %.4g Hz is below the "
 			       "lowest octave band (125 Hz, lower edge %.4g Hz) — using the "
 			       "125 Hz alpha for all walls", ac->fmax, AC_BAND_F0 / AC_SQRT2);
+	}
+
+	/* ── 障害物の材質 (.ofdx acoustic.obstacles[]) : 外壁と同じ規則で実効値
+	 * (有効帯域と重なるバンドの平均) を決める。指定なしは剛体 (alpha = 0)。 ── */
+	if (ac->ngeom > 0) {
+		ac->gvox = (ac_gvox_t *)calloc((size_t)ac->ngeom, sizeof(ac_gvox_t));
+		if (!ac->gvox) {
+			ac_err(ac, "out of memory (%d geometries)", ac->ngeom);
+			return 1;
+		}
+	}
+	for (n = 0; n < ac->ngeom; n++) {
+		double sum = 0.0;
+		int b;
+		if (!ac->obs_has || !ac->obs_has[n]) continue;
+		for (b = 0; b < ac->alpha_nband; b++)
+			sum += ac->obs_bands[(size_t)n * AC_NBAND_OFDX + b];
+		ac->gvox[n].alpha = sum / ac->alpha_nband;
 	}
 
 	/* ── 計算時間 : T = clamp(1.5·T_Sabine, 0.5, 3.0)
@@ -467,6 +519,8 @@ int ac_setup(ac_t *ac)
 		int clamped = 0;
 		for (w = 0; w < AC_NWALL; w++)
 			if (ac->angle_dep && ac->alpha[w] > amax) clamped = 1;
+		for (n = 0; n < ac->ngeom; n++)
+			if (ac->angle_dep && ac->gvox[n].alpha > amax) clamped = 1;
 		if (ac->angle_dep) {
 			ac_log(ac, "angle-dependent absorption: locally reacting boundary "
 			       "Z = rho c zeta; zeta solved from the random-incidence alpha "
@@ -482,30 +536,9 @@ int ac_setup(ac_t *ac)
 		}
 	}
 	for (w = 0; w < AC_NWALL; w++) {
-		double a = ac->alpha[w];
-		if (a < 1e-6) {
-			ac->wrigid[w] = 1;   /* 剛壁 : 更新なし (v ≡ 0) — 厳密に無損失 */
-			ac->wZ[w] = 0.0;
-			ac->wA[w] = ac->wB[w] = 0.0;
-			ac->wzeta[w] = 0.0;
-		}
-		else {
-			double Z, ma = rho * ac->dx / (2.0 * ac->dt);
-			if (ac->angle_dep) {
-				double amax = ac_alpha_stat(ac_zeta_from_alpha(2.0));
-				ac->wzeta[w] = ac_zeta_from_alpha((a > amax) ? amax : a);
-				Z = rho * c * ac->wzeta[w];
-			}
-			else {
-				double s = sqrt(1.0 - ((a > 1.0) ? 1.0 : a));
-				Z = rho * c * (1.0 + s) / (1.0 - s + 1e-300);
-				ac->wzeta[w] = Z / (rho * c);
-			}
-			ac->wrigid[w] = 0;
-			ac->wZ[w] = Z;
-			ac->wA[w] = (ma - Z / 2.0) / (ma + Z / 2.0);
-			ac->wB[w] = 1.0 / (ma + Z / 2.0);
-		}
+		/* 剛壁 (alpha = 0) は更新なし (v ≡ 0) — 厳密に無損失 */
+		ac->wrigid[w] = bnd_coeffs(ac, ac->alpha[w], &ac->wZ[w], &ac->wA[w],
+		                           &ac->wB[w], &ac->wzeta[w]);
 		ac_log(ac, "wall %d (%s): alpha = %.4g (mean of %d band(s), "
 		       "<= %.4g Hz), zeta = %.4g -> %s", w,
 		       (w == AC_XM) ? "x-" : (w == AC_XP) ? "x+" :
@@ -538,11 +571,25 @@ int ac_setup(ac_t *ac)
 	/* ── 剛体ボクセル化 (セル中心が形状内 → 剛体) ──
 	 * 外接箱と重なる範囲だけを走査し、各セル中心を形状の内外判定にかける。
 	 * 形状ごとのセル数・重心・外接範囲を記録する (solver.log / metadata)。 */
-	if (ac->ngeom > 0) {
-		ac->gvox = (ac_gvox_t *)calloc((size_t)ac->ngeom, sizeof(ac_gvox_t));
-		if (!ac->gvox) {
-			ac_err(ac, "out of memory (%d geometries)", ac->ngeom);
-			return 1;
+	{
+		/* 吸音性の障害物があるときだけ、各剛体セルを「どの形状が最後に剛体に
+		 * したか」で引けるようにする (重なりは後の行が優先 — GUI と同じ)。
+		 * 界面リストを作ったら捨てる一時配列。 */
+		int any = 0;
+		for (n = 0; n < ac->ngeom; n++)
+			if (ac->gvox[n].alpha >= 1e-6) any = 1;
+		if (any) {
+			if (ac->ngeom > 65535) {
+				ac_err(ac, "too many geometries with acoustic.obstacles "
+				       "materials (%d > 65535)", ac->ngeom);
+				return 1;
+			}
+			gown = (unsigned short *)calloc(np, sizeof(unsigned short));
+			if (!gown) {
+				ac_err(ac, "out of memory (obstacle material map, %lld cells)",
+				       cells);
+				return 1;
+			}
 		}
 	}
 	for (n = 0; n < ac->ngeom; n++) {
@@ -562,6 +609,8 @@ int ac_setup(ac_t *ac)
 				for (i = r[0]; i <= r[1]; i++) {
 					if (!geom_marks(ac, g, r, i, j, k)) continue;
 					ac->solid[((size_t)k * ny + j) * nx + i] = 1;
+					if (gown)
+						gown[((size_t)k * ny + j) * nx + i] = (unsigned short)(n + 1);
 					gv->ncell++;
 					sx += i; sy += j; sz += k;
 					if (i < ilo) ilo = i;
@@ -621,6 +670,72 @@ int ac_setup(ac_t *ac)
 				ac->mvz[((size_t)k * ny + j) * nx + i] =
 					!ac->solid[((size_t)(k - 1) * ny + j) * nx + i] &&
 					!ac->solid[((size_t)k * ny + j) * nx + i];
+
+	/* ── 吸音性の障害物の界面 (流体セルと、材質を持つ剛体セルの間の面) ──
+	 * 外壁と同じ半陰的インピーダンス更新をする (面と最寄りの p 節点の間は
+	 * 外壁と同じ半セル)。剛体が面の負側なら外壁 x- と同じ式、正側なら x+ と
+	 * 同じ式。数え上げ → 確保 → 記入の 2 パス。材質なしの剛体の面は従来どおり
+	 * マスクで v ≡ 0 のまま (厳密に無損失)。 */
+	if (gown) {
+		long cnt = 0, pass;
+		for (pass = 0; pass < 2; pass++) {
+			long m = 0;
+			int ax;
+			for (ax = 0; ax < 3; ax++) {
+				const int ex = (ax == 0), ey = (ax == 1), ez = (ax == 2);
+				for (k = ez; k < nz; k++)
+					for (j = ey; j < ny; j++)
+						for (i = ex; i < nx; i++) {
+							size_t ca = ((size_t)(k - ez) * ny + (j - ey)) * nx + (i - ex);
+							size_t cb = ((size_t)k * ny + j) * nx + i;
+							size_t cs, cf;
+							int g, sg;
+							if (ac->solid[ca] == ac->solid[cb]) continue;
+							cs = ac->solid[ca] ? ca : cb;      /* 剛体側 */
+							cf = ac->solid[ca] ? cb : ca;      /* 流体側 */
+							sg = ac->solid[ca] ? -1 : +1;      /* 剛体が負側なら -1 */
+							g = (int)gown[cs] - 1;
+							if (g < 0 || ac->gvox[g].alpha < 1e-6) continue;
+							if (pass == 1) {
+								ac_oface_t *o = &ac->oface[m];
+								double Zd, zd;
+								o->axis = ax;
+								o->sgn = sg;
+								o->pi = cf;
+								o->vi = (ax == 0) ? ((size_t)k * ny + j) * (nx + 1) + i
+								      : (ax == 1) ? ((size_t)k * (ny + 1) + j) * nx + i
+								                  : ((size_t)k * ny + j) * nx + i;
+								bnd_coeffs(ac, ac->gvox[g].alpha, &Zd, &o->A, &o->B, &zd);
+								ac->gvox[g].nface++;
+							}
+							m++;
+						}
+			}
+			if (pass == 0) {
+				cnt = m;
+				ac->oface = (ac_oface_t *)calloc((size_t)(cnt > 0 ? cnt : 1),
+				                                 sizeof(ac_oface_t));
+				if (!ac->oface) {
+					free(gown);
+					ac_err(ac, "out of memory (%ld obstacle faces)", cnt);
+					return 1;
+				}
+			}
+		}
+		ac->noface = cnt;
+		free(gown);
+		gown = NULL;
+	}
+	for (n = 0; n < ac->ngeom; n++) {
+		ac_gvox_t *gv = &ac->gvox[n];
+		double Zd, Ad, Bd;
+		if (!ac->obs_has || !ac->obs_has[n]) continue;
+		bnd_coeffs(ac, gv->alpha, &Zd, &Ad, &Bd, &gv->zeta);
+		ac_log(ac, "obstacle #%d (shape %d): alpha = %.4g (mean of %d band(s), "
+		       "<= %.4g Hz), zeta = %.4g -> %s, %ld fluid faces", n + 1,
+		       ac->geom[n].shape, gv->alpha, ac->alpha_nband, ac->alpha_band_hi,
+		       gv->zeta, (gv->alpha < 1e-6) ? "rigid" : "impedance", gv->nface);
+	}
 
 	/* ── 使用する音源集合 (複数音源の契約 : ADR-0010) ──
 	 * 既定は feed #1 のみ (従来動作と完全一致)。multi_source なら全 feed に
@@ -827,6 +942,19 @@ int ac_run(ac_t *ac)
 					}
 		}
 
+		/* ── 吸音性の障害物の面 : 外壁と同じ式 (面ごとに独立 — リダクションなし) ── */
+		{
+			long f;
+			for (f = 0; f < ac->noface; f++) {
+				const ac_oface_t *o = &ac->oface[f];
+				double *v = ((o->axis == 0) ? vx : (o->axis == 1) ? vy : vz) + o->vi;
+				if (o->sgn < 0)
+					*v = o->A * (*v) - o->B * p[o->pi];
+				else
+					*v = o->A * (*v) + o->B * p[o->pi];
+			}
+		}
+
 		/* ── p 更新 : セルごとに独立 — リダクションなし。剛体セルは周囲の
 		 * v が 0 に固定されているため発散が 0 で自然に p = 0 のまま ── */
 #ifdef _OPENMP
@@ -886,6 +1014,9 @@ void ac_free(ac_t *ac)
 {
 	free(ac->geom);  ac->geom = NULL;
 	free(ac->gvox);  ac->gvox = NULL;
+	free(ac->obs_has); ac->obs_has = NULL;
+	free(ac->obs_bands); ac->obs_bands = NULL;
+	free(ac->oface); ac->oface = NULL;
 	free(ac->feedpos); ac->feedpos = NULL;
 	free(ac->srccell); ac->srccell = NULL;
 	free(ac->srcgain); ac->srcgain = NULL;

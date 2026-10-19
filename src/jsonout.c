@@ -143,12 +143,17 @@ int ac_write_metadata(ac_t *ac)
 		for (n = 0; n < ac->ngeom; n++) {
 			const ac_gvox_t *gv = &ac->gvox[n];
 			double dv = ac->dx * ac->dx * ac->dx;
+			/* boundary_* は表面の境界 (.ofdx acoustic.obstacles[]。指定なし =
+			 * 剛体 = alpha 0 / zeta 0 / 界面 0)。 */
 			fprintf(fp, "    { \"shape\": %d, \"cells\": %ld, \"volume_m3\": %.10g, "
 			        "\"centroid_m\": [%.10g, %.10g, %.10g], "
-			        "\"extent_m\": [%.10g, %.10g, %.10g, %.10g, %.10g, %.10g] }%s\n",
+			        "\"extent_m\": [%.10g, %.10g, %.10g, %.10g, %.10g, %.10g], "
+			        "\"boundary_alpha\": %.10g, \"boundary_zeta\": %.10g, "
+			        "\"impedance_faces\": %ld }%s\n",
 			        ac->geom[n].shape, gv->ncell, gv->ncell * dv,
 			        gv->cen[0], gv->cen[1], gv->cen[2],
 			        gv->lo[0], gv->hi[0], gv->lo[1], gv->hi[1], gv->lo[2], gv->hi[2],
+			        gv->alpha, gv->zeta, gv->nface,
 			        (n + 1 < ac->ngeom) ? "," : "");
 		}
 		fprintf(fp, "  ],\n");

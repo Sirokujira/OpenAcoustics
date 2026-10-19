@@ -56,7 +56,22 @@ typedef struct {
 	long   ncell;      /* この形状が剛体にしたセル数 (他形状との重なりも数える) */
 	double cen[3];     /* そのセル中心の平均 [m] (ncell = 0 なら 0) */
 	double lo[3], hi[3]; /* そのセル群の外接範囲 (セル面) [m] */
+	/* 表面の境界 (.ofdx acoustic.obstacles[]。指定なしは剛体 = 0) */
+	double alpha;      /* 実効吸音率 (外壁と同じく有効帯域内のバンド平均) */
+	double zeta;       /* 規格化インピーダンス Z/(rho c) (剛体は 0) */
+	long   nface;      /* インピーダンス更新する流体との界面の数 */
 } ac_gvox_t;
+
+/* 吸音性の障害物と流体の界面 1 枚 (外壁と同じ半陰的インピーダンス更新)。
+ * sgn < 0 : 剛体が面の負側 (外壁 x- と同じ式 v = A v - B p)、
+ * sgn > 0 : 剛体が正側 (外壁 x+ と同じ式 v = A v + B p)。 */
+typedef struct {
+	size_t vi;         /* 面の速度の添字 (axis の vx/vy/vz 内) */
+	size_t pi;         /* 流体側セルの p の添字 */
+	double A, B;       /* 境界係数 (外壁の wA / wB と同じ定義) */
+	int    axis;       /* 0 = x, 1 = y, 2 = z */
+	int    sgn;
+} ac_oface_t;
 
 typedef struct {
 	char   name[AC_NAME_MAX];   /* .ofd point 行の "# 名前" (空可) */
@@ -86,6 +101,14 @@ typedef struct {
 	ac_geom_t *geom;
 	int        ngeom;
 	ac_gvox_t *gvox;                   /* ngeom 要素 (setup で確保、ac_free で解放) */
+	/* 障害物の材質 (.ofdx acoustic.obstacles[] — acoustic 直下で幾何音響と
+	 * 共有するキー)。NULL = 指定なし = 全障害物が剛体 (従来動作)。
+	 * 幾何音響専用の acoustic.ga.obstacles[] は読まない (acoustic.ga は
+	 * 丸ごと読み飛ばす規約 — 既存入力の FDTD 結果を変えないため)。 */
+	unsigned char *obs_has;            /* ngeom 要素 : 1 = 材質指定あり */
+	double        *obs_bands;          /* ngeom * AC_NBAND_OFDX (125 Hz .. 4 kHz) */
+	ac_oface_t    *oface;              /* 吸音性の障害物の界面 (setup で作成) */
+	long           noface;
 	double     srcx, srcy, srcz;       /* feed #1 の位置 (metadata の source 用) */
 	double    *feedpos;                /* 全 feed の座標 (3 * nfeed) */
 	int        nfeed;

@@ -368,8 +368,105 @@ static int parse_feeds(ac_t *ac, js_t *j)
 	}
 }
 
+/* ── acoustic.obstacles : 障害物 (geometry) ごとの材質 ───────────────
+ * [ { "geometry": 1 起点の番号, "alpha": [6 値], "enabled", "name",
+ *     "scattering" (幾何音響専用 — ここでは読み飛ばす) }, ... ]
+ * acoustic 直下に置くのは幾何音響と**共有する**キーだから (両ソルバーが
+ * 同じ障害物を同じ材質で見る)。幾何音響専用の acoustic.ga.obstacles[] は
+ * 読まない (acoustic.ga は丸ごと読み飛ばす規約 — そちらだけを書いた既存の
+ * 入力で FDTD の結果が変わらないように)。alpha 省略は剛体のまま、足りない
+ * バンドは最後の値で外挿 (外壁と同じ規則)。存在しない番号は非零終了、
+ * 同じ番号の行が複数あれば最初の行を使う (幾何音響側と同じ規則)。 */
+static int parse_obstacle_row(ac_t *ac, js_t *j)
+{
+	char key[64];
+	double a[AC_NBAND_OFDX], v;
+	int acount = 0, idx = 0, enabled = 1, b;
+
+	for (b = 0; b < AC_NBAND_OFDX; b++) a[b] = 0.0;
+	if (jexpect(j, '{')) return 1;
+	if (jpeek(j) == '}') { j->s++; return 0; }
+	for (;;) {
+		if (jstring(j, key, sizeof(key))) return 1;
+		if (jexpect(j, ':')) return 1;
+		if (!strcmp(key, "enabled")) {
+			if (jbool(j, &enabled)) return 1;
+		}
+		else if (!strcmp(key, "geometry")) {
+			if (jnumber(j, &v)) return 1;
+			idx = (int)v;
+		}
+		else if (!strcmp(key, "alpha")) {
+			if (jexpect(j, '[')) return 1;
+			if (jpeek(j) == ']') { j->s++; }
+			else {
+				for (;;) {
+					if (jnumber(j, &v)) return 1;
+					if (v < 0.0) v = 0.0;
+					if (v > 1.0) v = 1.0;
+					if (acount < AC_NBAND_OFDX) a[acount] = v;
+					acount++;
+					if (jpeek(j) == ',') { j->s++; continue; }
+					break;
+				}
+				if (jexpect(j, ']')) return 1;
+			}
+		}
+		else {
+			if (jskip(j)) return 1;   /* name / scattering / 未知キー */
+		}
+		if (jpeek(j) == ',') { j->s++; continue; }
+		if (jexpect(j, '}')) return 1;
+		break;
+	}
+	if (!enabled) return 0;
+	if (idx < 1 || idx > ac->ngeom) {
+		ac_err(ac, ".ofdx acoustic.obstacles: geometry = %d does not match "
+		       "any geometry line in the .ofd (it has %d — the index is "
+		       "1-based, same as \"geometry #N\" in solver.log)", idx, ac->ngeom);
+		return 1;
+	}
+	if (!ac->obs_has) {
+		ac->obs_has = (unsigned char *)calloc((size_t)ac->ngeom, 1);
+		ac->obs_bands = (double *)calloc((size_t)ac->ngeom * AC_NBAND_OFDX,
+		                                 sizeof(double));
+		if (!ac->obs_has || !ac->obs_bands) {
+			ac_err(ac, "out of memory (acoustic.obstacles, %d geometries)",
+			       ac->ngeom);
+			return 1;
+		}
+	}
+	if (ac->obs_has[idx - 1]) {
+		ac_log(ac, "warning: .ofdx acoustic.obstacles has multiple rows for "
+		       "geometry #%d — using the first", idx);
+		return 0;
+	}
+	ac->obs_has[idx - 1] = 1;
+	for (b = 0; b < AC_NBAND_OFDX; b++)
+		ac->obs_bands[(size_t)(idx - 1) * AC_NBAND_OFDX + b] =
+			(acount <= 0) ? 0.0 : (b < acount) ? a[b] : a[acount - 1];
+	{
+		const double *o = ac->obs_bands + (size_t)(idx - 1) * AC_NBAND_OFDX;
+		ac_log(ac, ".ofdx: obstacle #%d material -> alpha = "
+		       "[%.4g %.4g %.4g %.4g %.4g %.4g] (125 Hz .. 4 kHz, "
+		       "acoustic.obstacles)", idx, o[0], o[1], o[2], o[3], o[4], o[5]);
+	}
+	return 0;
+}
+
+static int parse_obstacles(ac_t *ac, js_t *j)
+{
+	if (jexpect(j, '[')) return 1;
+	if (jpeek(j) == ']') { j->s++; return 0; }
+	for (;;) {
+		if (parse_obstacle_row(ac, j)) return 1;
+		if (jpeek(j) == ',') { j->s++; continue; }
+		return jexpect(j, ']');
+	}
+}
+
 /* root.acoustic の中身 (読むのは absorption / receivers / multi_source /
- * feeds / angle_dependent_absorption のみ、他は読み飛ばす) */
+ * feeds / angle_dependent_absorption / obstacles のみ、他は読み飛ばす) */
 static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
@@ -391,6 +488,10 @@ static int walk_acoustic(ac_t *ac, js_t *j)
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "obstacles")) {
+			/* 障害物の材質 — 幾何音響と共有するキー (parse_obstacles 参照) */
+			if (parse_obstacles(ac, j)) return 1;
 		}
 		else if (!strcmp(key, "angle_dependent_absorption")) {
 			/* 角度依存吸音 (局所反応境界) : 既定 false = 従来どおり

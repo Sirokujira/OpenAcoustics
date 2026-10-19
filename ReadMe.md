@@ -37,7 +37,7 @@ fmax = 68.6 Hz)。そこで**低域 = FDTD、高域 = 幾何音響**のハイブ
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 (解析解との比較 — 156 判定 : FDTD 75 + 幾何音響 81)
+# 検証 (解析解との比較 — 165 判定 : FDTD 82 + 幾何音響 83)
 # 第 3 引数を省略すると実行ファイル名の fdtd -> ga 置換で高域側を見つける
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
 ```
@@ -100,6 +100,20 @@ ofdx_acoustic_ga   <working_dir> [<input_file.ofd>]   # 高域 (幾何音響)
   後方互換)。FDTD の境界更新 (v_n = p/Z) は角度依存性を離散化から自動的に
   持つので、実装が決めるのは ζ ただ 1 つ。metadata に
   `angle_dependent_absorption` と `boundary_zeta` (壁ごとの ζ) が入る。
+- **障害物の材質** (opt-in、両ソルバー対称): `.ofdx` の
+  `acoustic.obstacles[]` = `[ { "geometry": 1, "alpha": [6 値] }, ... ]`
+  (`geometry` は `.ofd` の geometry 行の **1 起点**の番号、`alpha` 省略 =
+  剛体のまま、足りないバンドは最後の値で外挿、存在しない番号は非零終了)。
+  キーが無ければ全障害物が剛体 (従来動作と完全一致)。FDTD は吸音性の
+  障害物と流体の界面を**外壁と同じ半陰的インピーダンス更新**にする
+  (実効 α は外壁と同じく有効帯域内のバンド平均、角度依存吸音も同じ ζ)。
+  幾何音響は障害物の 6 面の鏡面反射・レイの反射に使う (`scattering` も
+  書ける — FDTD は読み飛ばす)。幾何音響専用の `acoustic.ga.obstacles[]`
+  (従来のキー) は**FDTD では読まない**ので、両方に効かせるにはこちらに
+  書く。同じ geometry の行が両方にあれば幾何音響では `acoustic.ga` 側が
+  優先する (既存入力の後方互換)。metadata の `geometry_voxels` 各要素に
+  `boundary_alpha` / `boundary_zeta` / `impedance_faces` (流体との界面数) が
+  入る。透過は扱わない (障害物の向こうへ音は届かない)。
 
 ### 出力 (working_dir 直下 — ADR-0007 契約)
 
@@ -275,7 +289,7 @@ W<sub>0</sub> = 1 (f ≤ 125 Hz)、W<sub>6</sub> = 1 (f ≥ 8 kHz)
 | `air_absorption` | true | — | 空気吸収の有無 |
 | `receiver_radius_m` | 自動 | 0〜10 | 受音検出球の半径 (自動は V<sup>1/3</sup>/10 を 0.3〜1.5 m に制限し、壁・障害物・音源に食い込まないよう切り詰める) |
 | `duration_s` | 自動 | 0〜10 | 計算時間 (自動は clamp(1.5·max<sub>b</sub> T<sub>Eyring</sub>, 0.5, 3.0) s、最遠受音点の直接音が必ず入るよう下限も確保) |
-| `obstacles` | — | — | 障害物ごとの材質: `[{ "geometry": 1, "alpha": [6 値], "scattering": 0.4 }]`。`geometry` は `.ofd` の geometry 行の **1 起点**の番号 (solver.log の `geometry #N` と同じ)。`alpha` 省略 = 剛体のまま、`scattering` 省略 = 室の既定 (こちらも数値/配列可)。存在しない番号は非零終了 |
+| `obstacles` | — | — | 障害物ごとの材質 (**幾何音響専用**): `[{ "geometry": 1, "alpha": [6 値], "scattering": 0.4 }]`。`geometry` は `.ofd` の geometry 行の **1 起点**の番号 (solver.log の `geometry #N` と同じ)。`alpha` 省略 = 剛体のまま、`scattering` 省略 = 室の既定 (こちらも数値/配列可)。存在しない番号は非零終了。**両ソルバーに効かせるには `acoustic` 直下の `acoustic.obstacles[]` (同じ書式) に書く** — 同じ geometry が両方にあれば幾何音響ではこちらが優先 |
 
 面ごとの散乱係数は `acoustic.absorption[]` の各行に `"scattering": 0.4` を
 足して指定する (省略時は上の `acoustic.ga.scattering`)。role → 壁の対応は
@@ -323,9 +337,9 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
   並べて近似するしかない。
 - **`geometry` の障害物は既定で剛体 (α = 0)**。その 6 面は鏡像法の反射面
   集合に入るので低次の鏡面反射も出る。材質は `.ofdx` の
-  `acoustic.ga.obstacles[]` で与えられる (下記) が、**FDTD 側は geometry を
-  常に剛体としてボクセル化する**ので、材質を与えると障害物の扱いが
-  低域 (剛体) と高域 (吸音) で異なる点に注意。透過は扱わない (α は
+  `acoustic.obstacles[]` (FDTD と共有 — 両ソルバーに同じ材質が効く) か、
+  幾何音響専用の `acoustic.ga.obstacles[]` (下記。FDTD は読まないので、
+  こちらだけに書くと低域は剛体・高域は吸音になる) で与える。透過は扱わない (α は
   「戻らないエネルギー」であって、障害物の向こうへは届かない — 遮蔽は
   材質によらず効く)。shape 1 (直方体) は厳密、その他の shape は
   **AABB 近似** (warning)。FDTD 側は全 shape を形状どおりにボクセル化する
@@ -368,8 +382,8 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 
 ## 検証ケース (data/sample/ — 期待値はすべて実装から独立な解析解)
 
-`acoustic_check.sh` が CI (3 OS + sanitize) で全 156 判定 (FDTD 75 +
-幾何音響 81) を実行する。各 `.ofd` の先頭コメントに期待値の導出が書いてある。
+`acoustic_check.sh` が CI (3 OS + sanitize) で全 165 判定 (FDTD 82 +
+幾何音響 83) を実行する。各 `.ofd` の先頭コメントに期待値の導出が書いてある。
 
 ### ofdx_acoustic_fdtd
 
@@ -379,6 +393,7 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 | `box_modes` | 剛壁 + DC なし音源のエネルギー保存 | 離散系は無損失 | 窓間減衰 ≤ 0.5 dB |
 | `tube_a03` / `tube_a09` | 準 1D 管の端面反射係数 (α = 0.3 / 0.9) | R = √(1−α) | ±3% |
 | `tube_a03` / `tube_a03_oob` | (b3) 帯域外 (1k/2k/4k Hz) の α だけが違う同一の管 — 実効 α は帯域内 (125/250/500 Hz) だけで決まる | 規約 (どのバンドを使うか) + 使用バンド数/上端 (metadata) | **rir.wav がバイト一致** |
+| `tube_obstacle` | (o) 吸音性の障害物 (`acoustic.obstacles`、α = 0.3) の面の反射係数 / 同じ位置の外壁と同じ境界であること (角度依存吸音でも) / キーなしは剛体 (R = 1)、`acoustic.ga.obstacles` は読まない、不正な番号は非零終了 | R = √(1−α) + 外壁との同一性 | ±3% / **ビット一致** / 異常系 |
 | `anechoic` | 直接音到達時刻 (全壁 α=1、r = 3 m) | t = t0 + r/c | σ + 2/fs |
 | `tube_angle` | (i) 角度依存吸音 (opt-in): 垂直入射の R = (ζ−1)/(ζ+1)、ζ は α<sub>stat</sub> = 0.3 の Paris 逆解 = 19.766 / false 指定は既定とビット一致 / α > 0.9512 はクランプ + warning | Paris の式 (教科書、awk で独立に二分法) | ±3% / ビット一致 |
 | `box_pillar` | 剛体障害物 + 既定吸音の T_Sabine | 0.161·V/A = 0.409 s | ±1% |
@@ -406,6 +421,7 @@ FDTD 側と揃えるため c = 343.0 m/s 固定。
 | `ga_angle` | (I) 同じ切り替えを `acoustic` 直下 (FDTD と共有するキー) に書いても同じ壁になる | 両ソルバー対称の契約 | **ビット一致** |
 | `ga_panel` | (J) 障害物の材質 (α = 0.36): 板反射が √(1−α) 倍、直接音は不変 | √0.64 × 1/(4πr₁) | ±1% |
 | `ga_panel` | (J) 障害物の散乱係数 = 1 で板の鏡面像が消える / 不正な geometry 番号は非零終了 | 像の数 / 異常系 | 完全一致 |
+| `ga_panel` | (J) 同じ材質を `acoustic.obstacles` (FDTD と共有) に書いても同じ板 / 両方あれば `acoustic.ga.obstacles` が優先 | 両ソルバー共有の契約 | **ビット一致** |
 | `ga_two` | (K) multi_source の 2 音源: 直接音がそれぞれ 1/(4πr_i)、t_i = r_i/c | 自由音場の閉形式 (r₁ = 10, r₂ = 20 m) | ±1% |
 | `ga_two` | (K) 既定 (multi_source なし) は feed #1 のみ + warning / 室外の音源は非零終了 | 後方互換 / 異常系 | 完全一致 |
 | `ga_two` | (K2) 音源ごとのゲイン・遅延: 直接音がそれぞれ gain_i/(4πr_i)、t = delay_i + r_i/c / 範囲外の gain・delay_s は非零終了 | 自由音場の閉形式 × ゲイン・遅延の定義 | ±1% / 異常系 |

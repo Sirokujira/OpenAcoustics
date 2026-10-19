@@ -12,6 +12,9 @@
 #  (i) 角度依存吸音 (opt-in) : Paris の逆解 zeta で境界を作り、垂直入射の
 #      R = (zeta-1)/(zeta+1) が ±3%。false 指定は既定とビット一致、
 #      alpha > 0.9512 はクランプ + warning
+#  (o) 障害物の材質 (acoustic.obstacles) : 吸音性の障害物の面の R = sqrt(1-alpha)
+#      ±3%、同じ位置の外壁と rir.wav がビット一致 (角度依存も)、キーなしは
+#      剛体のまま、acoustic.ga.obstacles は読まない、不正な番号は非零終了
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
 #  (v) 非直方体の geometry : 13 種の shape のボクセル体積が解析値と ±5%、
@@ -38,7 +41,8 @@
 #  (B2) 面ごとの散乱係数が室全体の既定を上書きする (床 s = 0 / 1)
 #  (I) 局所反応境界の角度依存反射 R(theta) が Paris の式の逆解と ±1%
 #  (J) 障害物の材質 (acoustic.ga.obstacles) : alpha で鏡面反射が
-#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
+#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了、
+#      acoustic 直下 (FDTD と共有) でも同じ板、両方あれば acoustic.ga が優先
 #  (K) 複数音源 (multi_source) : 2 音源の直接音がそれぞれ 1/(4 pi r_i) ±1%、
 #      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
 #  (K2) feed ごとのゲイン・遅延 (acoustic.feeds) : 直接音がそれぞれ
@@ -314,6 +318,64 @@ if "$SOLVER" "$WORK/tube_angle_clamp" > /dev/null 2>&1 &&
 	say_ok "angle-dep alpha clamp" " (alpha=1 を警告してクランプ)"
 else
 	say_ng "angle-dep alpha clamp"
+fi
+
+echo "--- (o) absorbing obstacle face (.ofdx acoustic.obstacles, +-3% / bit-identical)"
+# 障害物の材質を FDTD でも扱う。tube_obstacle は tube_a03 の管を 9 m に延ばして
+# x = 8..9 m を障害物で埋めたもの — その面 (x = 8 m) は tube_a03 の右端の壁と
+# 同じ位置で、alpha も同じ。障害物の面は外壁と同じ半陰的インピーダンス更新
+# なので、R = sqrt(0.7) かつ rir.wav が tube_a03 とバイト一致する (導出は
+# tube_obstacle.ofd)。キーを外せば従来どおり剛体 (R = 1)、幾何音響専用の
+# acoustic.ga.obstacles は FDTD では読まない。
+run_case tube_obstacle tube_obstacle.ofd tube_obstacle.ofdx && {
+	res=$(tube_R "$WORK/tube_obstacle" "$fs_tube")
+	chk "obstacle face R (a=0.3)" "${res#* }" 0.836660027 0.03   # sqrt(0.7)
+	if cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_obstacle/rir.wav"; then
+		say_ok "obstacle face == wall" " (tube_a03 と rir.wav がビット一致)"
+	else
+		say_ng "obstacle face == wall"
+	fi
+	if grep -q '"boundary_alpha": 0.3, "boundary_zeta": [0-9.]*, "impedance_faces": 1 }' \
+	        "$WORK/tube_obstacle/metadata.json"; then
+		say_ok "obstacle metadata" " (geometry_voxels: alpha 0.3, 1 face)"
+	else
+		say_ng "obstacle metadata"
+	fi
+}
+tube_variant() {   # tube_variant <case> <sed 式> : tube_obstacle の .ofdx だけを変えて実行
+	rm -rf "$WORK/$1"; mkdir -p "$WORK/$1"
+	cp "$SRC/tube_obstacle.ofd" "$WORK/$1/"
+	sed "$2" "$SRC/tube_obstacle.ofdx" > "$WORK/$1/tube_obstacle.ofdx"
+	"$SOLVER" "$WORK/$1" > /dev/null 2> "$WORK/$1/stderr.log"
+}
+# キーなし -> 障害物は剛体のまま (従来動作) : 右端の反射 R = 1
+if tube_variant tube_obs_rigid '/"obstacles":/d'; then
+	res=$(tube_R "$WORK/tube_obs_rigid" "$fs_tube")
+	chk "obstacle default rigid R" "${res#* }" 1.0 0.03
+else
+	say_ng "obstacle default rigid R" " (solver failed)"
+fi
+# 幾何音響専用の acoustic.ga.obstacles だけ -> FDTD は読まない (剛体と同一)
+if tube_variant tube_obs_gaonly 's/^    "obstacles": \(.*\),$/    "ga": { "obstacles": \1 },/' &&
+   cmp -s "$WORK/tube_obs_rigid/rir.wav" "$WORK/tube_obs_gaonly/rir.wav"; then
+	say_ok "FDTD ignores ga.obstacles" " (剛体のときとビット一致)"
+else
+	say_ng "FDTD ignores ga.obstacles"
+fi
+# 角度依存吸音も障害物の面に効く : tube_angle (外壁で同じ設定) とビット一致
+if tube_variant tube_obs_angle 's/"acoustic": {/"acoustic": { "angle_dependent_absorption": true,/' &&
+   cmp -s "$WORK/tube_angle/rir.wav" "$WORK/tube_obs_angle/rir.wav"; then
+	say_ok "obstacle angle-dep == wall" " (tube_angle とビット一致)"
+else
+	say_ng "obstacle angle-dep == wall"
+fi
+# 存在しない geometry を指す行は非零終了 (幾何音響側と同じ規則)
+if tube_variant tube_obs_bad 's/"geometry": 1,/"geometry": 9,/'; then
+	say_ng "obstacle bad index exit" " (should fail)"
+elif grep -q "acoustic.obstacles: geometry = 9" "$WORK/tube_obs_bad/stderr.log"; then
+	say_ok "obstacle bad index exit" " (refused with the reason)"
+else
+	say_ng "obstacle bad index exit" " (no reason on stderr)"
 fi
 
 echo "--- (c) direct sound arrival t = t0 + r/c"
@@ -958,6 +1020,29 @@ if "$GA_SOLVER" "$WORK/ga_panel_mat" > /dev/null 2>&1; then
 		"$(awk -v r="$r0" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
 else
 	say_ng "ga obstacle material run" " (solver failed)"
+fi
+# 同じ材質を acoustic 直下 (FDTD と共有するキー) に書いても同じ板になる。
+# 両方に書けば幾何音響専用の acoustic.ga.obstacles が勝つ (既存入力の互換)。
+rm -rf "$WORK/ga_panel_top"; mkdir -p "$WORK/ga_panel_top"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_top/"
+sed 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ],/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_top/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_top" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_top/rir.wav"; then
+	say_ok "ga obstacle top-level key" " (acoustic 直下でもビット一致)"
+else
+	say_ng "ga obstacle top-level key"
+fi
+rm -rf "$WORK/ga_panel_both"; mkdir -p "$WORK/ga_panel_both"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_both/"
+sed -e 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] } ],/' \
+    -e 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_both/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_both" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_both/rir.wav"; then
+	say_ok "ga obstacle ga-level wins" " (acoustic.ga.obstacles が優先)"
+else
+	say_ng "ga obstacle ga-level wins"
 fi
 # 板の散乱係数 = 1 (alpha 省略 = 剛体のまま) -> 板の鏡面像が拡散に回って
 # 消える (受音点 #1 の image_sources が 2 -> 1。#2 はもともと 1)。
