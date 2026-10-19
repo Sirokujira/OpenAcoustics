@@ -12,8 +12,14 @@
 #  (i) 角度依存吸音 (opt-in) : Paris の逆解 zeta で境界を作り、垂直入射の
 #      R = (zeta-1)/(zeta+1) が ±3%。false 指定は既定とビット一致、
 #      alpha > 0.9512 はクランプ + warning
+#  (o) 障害物の材質 (acoustic.obstacles) : 吸音性の障害物の面の R = sqrt(1-alpha)
+#      ±3%、同じ位置の外壁と rir.wav がビット一致 (角度依存も)、キーなしは
+#      剛体のまま、acoustic.ga.obstacles は読まない、不正な番号は非零終了
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
+#  (v) 非直方体の geometry : 13 種の shape のボクセル体積が解析値と ±5%、
+#      重心 ±dx/2、外接範囲 ±2dx。外接箱の内側・形状の外の受音点が通り、
+#      形状の中の受音点は形状を名指しして拒否される
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
 #  (h) 複数音源 (multi_source) : 2 feed の同時発火が各 feed 単独の和に一致
@@ -35,7 +41,8 @@
 #  (B2) 面ごとの散乱係数が室全体の既定を上書きする (床 s = 0 / 1)
 #  (I) 局所反応境界の角度依存反射 R(theta) が Paris の式の逆解と ±1%
 #  (J) 障害物の材質 (acoustic.ga.obstacles) : alpha で鏡面反射が
-#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
+#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了、
+#      acoustic 直下 (FDTD と共有) でも同じ板、両方あれば acoustic.ga が優先
 #  (K) 複数音源 (multi_source) : 2 音源の直接音がそれぞれ 1/(4 pi r_i) ±1%、
 #      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
 #  (K2) feed ごとのゲイン・遅延 (acoustic.feeds) : 直接音がそれぞれ
@@ -313,6 +320,64 @@ else
 	say_ng "angle-dep alpha clamp"
 fi
 
+echo "--- (o) absorbing obstacle face (.ofdx acoustic.obstacles, +-3% / bit-identical)"
+# 障害物の材質を FDTD でも扱う。tube_obstacle は tube_a03 の管を 9 m に延ばして
+# x = 8..9 m を障害物で埋めたもの — その面 (x = 8 m) は tube_a03 の右端の壁と
+# 同じ位置で、alpha も同じ。障害物の面は外壁と同じ半陰的インピーダンス更新
+# なので、R = sqrt(0.7) かつ rir.wav が tube_a03 とバイト一致する (導出は
+# tube_obstacle.ofd)。キーを外せば従来どおり剛体 (R = 1)、幾何音響専用の
+# acoustic.ga.obstacles は FDTD では読まない。
+run_case tube_obstacle tube_obstacle.ofd tube_obstacle.ofdx && {
+	res=$(tube_R "$WORK/tube_obstacle" "$fs_tube")
+	chk "obstacle face R (a=0.3)" "${res#* }" 0.836660027 0.03   # sqrt(0.7)
+	if cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_obstacle/rir.wav"; then
+		say_ok "obstacle face == wall" " (tube_a03 と rir.wav がビット一致)"
+	else
+		say_ng "obstacle face == wall"
+	fi
+	if grep -q '"boundary_alpha": 0.3, "boundary_zeta": [0-9.]*, "impedance_faces": 1 }' \
+	        "$WORK/tube_obstacle/metadata.json"; then
+		say_ok "obstacle metadata" " (geometry_voxels: alpha 0.3, 1 face)"
+	else
+		say_ng "obstacle metadata"
+	fi
+}
+tube_variant() {   # tube_variant <case> <sed 式> : tube_obstacle の .ofdx だけを変えて実行
+	rm -rf "$WORK/$1"; mkdir -p "$WORK/$1"
+	cp "$SRC/tube_obstacle.ofd" "$WORK/$1/"
+	sed "$2" "$SRC/tube_obstacle.ofdx" > "$WORK/$1/tube_obstacle.ofdx"
+	"$SOLVER" "$WORK/$1" > /dev/null 2> "$WORK/$1/stderr.log"
+}
+# キーなし -> 障害物は剛体のまま (従来動作) : 右端の反射 R = 1
+if tube_variant tube_obs_rigid '/"obstacles":/d'; then
+	res=$(tube_R "$WORK/tube_obs_rigid" "$fs_tube")
+	chk "obstacle default rigid R" "${res#* }" 1.0 0.03
+else
+	say_ng "obstacle default rigid R" " (solver failed)"
+fi
+# 幾何音響専用の acoustic.ga.obstacles だけ -> FDTD は読まない (剛体と同一)
+if tube_variant tube_obs_gaonly 's/^    "obstacles": \(.*\),$/    "ga": { "obstacles": \1 },/' &&
+   cmp -s "$WORK/tube_obs_rigid/rir.wav" "$WORK/tube_obs_gaonly/rir.wav"; then
+	say_ok "FDTD ignores ga.obstacles" " (剛体のときとビット一致)"
+else
+	say_ng "FDTD ignores ga.obstacles"
+fi
+# 角度依存吸音も障害物の面に効く : tube_angle (外壁で同じ設定) とビット一致
+if tube_variant tube_obs_angle 's/"acoustic": {/"acoustic": { "angle_dependent_absorption": true,/' &&
+   cmp -s "$WORK/tube_angle/rir.wav" "$WORK/tube_obs_angle/rir.wav"; then
+	say_ok "obstacle angle-dep == wall" " (tube_angle とビット一致)"
+else
+	say_ng "obstacle angle-dep == wall"
+fi
+# 存在しない geometry を指す行は非零終了 (幾何音響側と同じ規則)
+if tube_variant tube_obs_bad 's/"geometry": 1,/"geometry": 9,/'; then
+	say_ng "obstacle bad index exit" " (should fail)"
+elif grep -q "acoustic.obstacles: geometry = 9" "$WORK/tube_obs_bad/stderr.log"; then
+	say_ok "obstacle bad index exit" " (refused with the reason)"
+else
+	say_ng "obstacle bad index exit" " (no reason on stderr)"
+fi
+
 echo "--- (c) direct sound arrival t = t0 + r/c"
 # 全壁 alpha=1 の部屋で r=3.0 m。受音波形は s(t) の時間微分 (Ricker 型、
 # 対称) なので |p| ピークはパルス中心に一致する。許容 sigma + 2/fs の
@@ -337,16 +402,117 @@ run_case box_pillar box_pillar.ofd && {
 	grep -q "normal end" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "box_pillar normal end" \
 		|| { printf "%-26s -> NG\n" "box_pillar normal end" >&2; status=1; }
-	# 複数 feed の warning と AABB 近似の warning が明示されること (v1 仕様)
+	# 複数 feed の warning が明示されること (v1 仕様)。円柱 (shape 13) は
+	# 外接箱で近似せず形状どおりにボクセル化され、その結果がログに出る
+	# (形状の精度そのものは下の (v) で解析値と比べる)。
 	grep -q "warning: 2 feeds" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "multi-feed warning" \
 		|| { printf "%-26s -> NG\n" "multi-feed warning" >&2; status=1; }
-	grep -q "AABB" "$d/solver.log" \
-		&& printf "%-26s -> OK\n" "AABB approx warning" \
-		|| { printf "%-26s -> NG\n" "AABB approx warning" >&2; status=1; }
+	if grep -q "voxelizer: geometry #2 shape 13 -> 40 cells" "$d/solver.log" &&
+	   ! grep -q "AABB" "$d/solver.log"; then
+		say_ok "exact voxelization log"
+	else
+		say_ng "exact voxelization log"
+	fi
 	# 吸音表なし -> 既定 alpha=0.1 の 6 面から T_Sabine = 0.409 s (導出は .ofd)
 	chk "default-alpha T_Sabine" "$(awk -F: '/t_sabine_s/ {gsub(/[ ,\r]/, "", $2); print $2}' "$d/metrics.json")" 0.4093 0.01
 }
+
+echo "--- (v) exact voxelization of every shape (volume +-5%, centroid +-dx/2)"
+# 本家 OpenFDTD の 13 種の shape を形状どおりに剛体化すること。期待値は
+# .ofd の geometry 行から下の awk が**解析的に**計算する (楕円体 pi/6 LxLyLz、
+# 円柱 pi/4 LxLyLz、三角柱 L*面積、錐台 L*int a b dt — 導出・許容の根拠は
+# voxel_shapes.ofd)。ソルバーの内外判定は使わない。
+vox_expect() {   # vox_expect <ofd> : 1 行 1 形状 "shape V cx cy cz wx wy wz"
+	awk 'function ab(x) { return (x < 0) ? -x : x }
+		function mx(a, b) { return (a > b) ? a : b }
+		function mn(a, b) { return (a < b) ? a : b }
+		BEGIN { PI = atan2(0, -1) }
+		/^geometry *=/ {
+			line = $0; sub(/^geometry *= */, "", line)
+			n = split(line, f, /[ \t]+/); s = f[2] + 0
+			for (i = 0; i < 8; i++) g[i] = (i + 3 <= n) ? f[i + 3] + 0 : 0
+			if (s == 1 || s == 2 || (s >= 11 && s <= 13)) {
+				for (a = 0; a < 3; a++) {
+					w[a] = ab(g[2*a + 1] - g[2*a]); c[a] = (g[2*a] + g[2*a + 1]) / 2
+				}
+				V = w[0] * w[1] * w[2] * ((s == 1) ? 1 : (s == 2) ? PI / 6 : PI / 4)
+			} else if (s >= 31 && s <= 33) {
+				ax = s - 31; u = (ax + 1) % 3; v = (ax + 2) % 3
+				w[ax] = ab(g[1] - g[0]); c[ax] = (g[0] + g[1]) / 2
+				c[u] = (g[2] + g[3] + g[4]) / 3; c[v] = (g[5] + g[6] + g[7]) / 3
+				w[u] = mx(mx(g[2], g[3]), g[4]) - mn(mn(g[2], g[3]), g[4])
+				w[v] = mx(mx(g[5], g[6]), g[7]) - mn(mn(g[5], g[6]), g[7])
+				V = w[ax] * ab((g[3] - g[2]) * (g[7] - g[5]) - (g[6] - g[5]) * (g[4] - g[2])) / 2
+			} else {
+				ax = (s % 10) - 1; u = (ax + 1) % 3; v = (ax + 2) % 3
+				L = g[1] - g[0]; a1 = g[4]; b1 = g[5]; da = g[6] - a1; db = g[7] - b1
+				I0 = a1 * b1 + (a1 * db + b1 * da) / 2 + da * db / 3
+				I1 = a1 * b1 / 2 + (a1 * db + b1 * da) / 3 + da * db / 4
+				V = ab(L) * I0 * ((s < 50) ? 1 : PI / 4)
+				c[ax] = g[0] + L * I1 / I0; c[u] = g[2]; c[v] = g[3]
+				w[ax] = ab(L); w[u] = mx(a1, g[6]); w[v] = mx(b1, g[7])
+			}
+			printf "%d %.10g %.10g %.10g %.10g %.10g %.10g %.10g\n", s, V, c[0], c[1], c[2], w[0], w[1], w[2]
+		}' "$1"
+}
+vox_actual() {   # vox_actual <metadata.json> : "shape cells V cx cy cz x1 x2 y1 y2 z1 z2"
+	awk '/"geometry_voxels"/ { on = 1; next }
+		on && /\]/ && !/"shape"/ { on = 0 }
+		on && /"shape"/ { l = $0; gsub(/"[a-z_0-9]+":/, "", l); gsub(/[][{},]/, " ", l)
+			$0 = l; $1 = $1; print }' "$1"
+}
+# (v-a) 形状の精度 : 受音点 #1〜#4 を外した入力で測る (受音点の受理と切り離し、
+# 形状の誤りが体積・重心・外接範囲のずれとして必ず読めるようにする)
+rm -rf "$WORK/voxel_vol"; mkdir -p "$WORK/voxel_vol"
+sed -e '/^point = z 0.125 0.175 0.125$/d' -e '/^point = z 1.125 0.175 0.125$/d' \
+    -e '/^point = z 1.525 0.375 0.125$/d' -e '/^point = z 2.225 0.175 0.475$/d' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_vol/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_vol/"
+if "$SOLVER" "$WORK/voxel_vol" > /dev/null 2> "$WORK/voxel_vol/stderr.log"; then
+	d="$WORK/voxel_vol"
+	vox_expect "$SRC/voxel_shapes.ofd" > "$d/vox_expect.txt"
+	vox_actual "$d/metadata.json" > "$d/vox_actual.txt"
+	paste -d ' ' "$d/vox_expect.txt" "$d/vox_actual.txt" > "$d/vox_pair.txt"
+	[ "$(wc -l < "$d/vox_pair.txt")" -eq 13 ] || say_ng "voxel shape count" " ($(wc -l < "$d/vox_pair.txt") lines)"
+	while read -r line; do
+		echo "$line" | awk '{
+			s = $1; Ve = $2; Va = $11; dv = (Va - Ve) / Ve; adv = (dv < 0) ? -dv : dv
+			dc = 0; dw = 0
+			for (a = 0; a < 3; a++) {
+				e = $(3 + a) - $(12 + a); if (e < 0) e = -e; if (e > dc) dc = e
+				e = $(6 + a) - ($(16 + 2*a) - $(15 + 2*a)); if (e < 0) e = -e; if (e > dw) dw = e
+			}
+			ok = (adv <= 0.05 && dc <= 0.025 && dw <= 0.1 && $9 == s)
+			printf "%-26s V=%.5f expected=%.5f %+.2f%%, |dc|<=%.3f |dw|<=%.3f m -> %s\n",
+			       sprintf("voxel shape %d", s), Va, Ve, dv * 100, dc, dw, ok ? "OK" : "NG"
+			exit ok ? 0 : 1 }' || status=1
+	done < "$d/vox_pair.txt"
+else
+	say_ng "voxel shapes run" " ($(head -1 "$WORK/voxel_vol/stderr.log"))"
+fi
+# (v-b) 受音点 #1〜#4 は外接箱の内側だが形状の外 (#2〜#4 は円柱の軸を取り
+# 違えると形状の中になる位置)。正常終了 = 形状どおりに判定されている。
+rm -rf "$WORK/voxel_shapes"; mkdir -p "$WORK/voxel_shapes"
+cp "$SRC/voxel_shapes.ofd" "$SRC/voxel_shapes.ofdx" "$WORK/voxel_shapes/"
+if "$SOLVER" "$WORK/voxel_shapes" > /dev/null 2> "$WORK/voxel_shapes/stderr.log" &&
+   grep -q "normal end" "$WORK/voxel_shapes/solver.log"; then
+	say_ok "voxel AABB-only points" " (外接箱の隅の受音点 4 点を受理)"
+else
+	say_ng "voxel AABB-only points" " ($(head -1 "$WORK/voxel_shapes/stderr.log"))"
+fi
+# 形状の中の受音点は (外接箱ではなく) 形状の判定で拒否され、どの形状かを名指しする
+rm -rf "$WORK/voxel_inside"; mkdir -p "$WORK/voxel_inside"
+sed 's/^point = z 0.125 0.175 0.125$/point = z 0.425 0.425 0.375/' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_inside/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_inside/"
+if "$SOLVER" "$WORK/voxel_inside" > /dev/null 2> "$WORK/voxel_inside/stderr.log"; then
+	say_ng "voxel inside-point exit" " (accepted a point inside the ellipsoid)"
+elif grep -q "inside rigid geometry #1 (shape 2)" "$WORK/voxel_inside/stderr.log"; then
+	say_ok "voxel inside-point exit" " (refused, names geometry #1)"
+else
+	say_ng "voxel inside-point exit" " (no reason on stderr)"
+fi
 
 echo "--- (e) determinism (bit-identical reruns and thread invariance)"
 # 乱数不使用。OpenMP 並列 (p 更新・v 更新のセルループ) はリダクションを
@@ -854,6 +1020,29 @@ if "$GA_SOLVER" "$WORK/ga_panel_mat" > /dev/null 2>&1; then
 		"$(awk -v r="$r0" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
 else
 	say_ng "ga obstacle material run" " (solver failed)"
+fi
+# 同じ材質を acoustic 直下 (FDTD と共有するキー) に書いても同じ板になる。
+# 両方に書けば幾何音響専用の acoustic.ga.obstacles が勝つ (既存入力の互換)。
+rm -rf "$WORK/ga_panel_top"; mkdir -p "$WORK/ga_panel_top"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_top/"
+sed 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ],/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_top/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_top" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_top/rir.wav"; then
+	say_ok "ga obstacle top-level key" " (acoustic 直下でもビット一致)"
+else
+	say_ng "ga obstacle top-level key"
+fi
+rm -rf "$WORK/ga_panel_both"; mkdir -p "$WORK/ga_panel_both"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_both/"
+sed -e 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] } ],/' \
+    -e 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_both/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_both" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_both/rir.wav"; then
+	say_ok "ga obstacle ga-level wins" " (acoustic.ga.obstacles が優先)"
+else
+	say_ng "ga obstacle ga-level wins"
 fi
 # 板の散乱係数 = 1 (alpha 省略 = 剛体のまま) -> 板の鏡面像が拡散に回って
 # 消える (受音点 #1 の image_sources が 2 -> 1。#2 はもともと 1)。

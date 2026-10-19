@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 141 判定 (FDTD 60 + 幾何音響 81)。1 本のスクリプトが
+# 検証 : 解析解との比較 165 判定 (FDTD 82 + 幾何音響 83)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**141 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**165 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -128,6 +128,27 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
    ハイブリッド合成 (ADR-0008) のバンドエネルギー整合は両ソルバーが同じ
    音源集合を使う前提なので、**片方だけ変えてはいけない**。
    番人は (h)(h2) 線形性判定と (K)(K2)。
+8. **剛体は形状どおりにボクセル化**: 本家 OpenFDTD の全 shape (1, 2,
+   11〜13, 31〜33, 41〜43, 51〜53) を「セル中心が形状の内側 (境界を含む)」で
+   剛体化する (`geom_inside`)。パラメータの並びは本家 sol/ingeometry.c と
+   同じで、OpenFDTD-X の `core/Geometry.h` が正 (軸付き形状の断面 2 軸は
+   u = (軸+1)%3, w = (軸+2)%3、錐台の幅は全幅で g[4..5] が軸 1 側)。
+   shape 1 は従来どおり外接箱の ceil/floor 範囲そのもの (既存入力の結果は
+   ビット単位で不変)。音源・受音点の「剛体内」判定と形状の名指しも同じ
+   規則 (`geom_marks`) を使う。番人は (v) — 13 種の体積・重心・外接範囲を
+   解析値と比べ、外接箱の隅の受音点が通ることを見る。幾何音響側は
+   AABB 近似のまま (曲面は鏡像法の平面反射面集合に入らない) なので、
+   FDTD の都合でそちらを変えないこと。
+9. **障害物の材質は外壁と同じ境界**: `.ofdx` の `acoustic.obstacles[]`
+   (`acoustic` 直下 — 幾何音響と共有) で材質を持つ障害物は、流体との界面を
+   外壁と同じ半陰的インピーダンス更新にする (係数は `bnd_coeffs` を外壁と
+   共有 — 実効 α は有効帯域内のバンド平均、角度依存吸音も同じ ζ)。面と
+   最寄りの p 節点の間が外壁と同じ半セルなので、同じ位置の外壁と流体の
+   時間発展がビット単位で一致する (番人は (o) の `tube_obstacle` と
+   tube_a03 / tube_angle の rir.wav 比較)。キーが無ければ剛体のまま
+   (界面はマスクで v ≡ 0 — 従来どおり厳密に無損失)。幾何音響専用の
+   `acoustic.ga.obstacles[]` は読まない (`acoustic.ga` は丸ごと読み飛ばす
+   規約 — そちらだけの既存入力で FDTD の結果を変えないため)。
 
 ## 幾何音響 (ofdx_acoustic_ga) の不変条件 — 番人は acoustic_check.sh の (A)〜(G)
 
@@ -234,12 +255,15 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
   両ソルバー対称。キー名は GUI が `acoustic.sources` を音源一覧として
   既に使っているため分けてある — 混ぜると静かに誤読する)。バンド別の散乱係数は `scattering` の配列指定で対応済み
   (基準確率での抽選 + バンド別の重み付け — 不変条件 6)。障害物の材質は
-  `.ofdx` の `acoustic.ga.obstacles[]` で対応済み (既定は剛体 — FDTD 側は
-  常に剛体なので、指定すると高域のみ材質が効く点は ReadMe に明記)。
+  `.ofdx` の `acoustic.obstacles[]` (`acoustic` 直下 — FDTD と共有、
+  両ソルバーに同じ材質が効く) と幾何音響専用の `acoustic.ga.obstacles[]`
+  (同じ geometry が両方にあれば幾何音響ではこちらが優先。FDTD は読まない)
+  で対応済み (既定は剛体)。
   実装したら制約表からも消すこと。逆に、原理的に無理なもの (回折、
   Schroeder 周波数より下) を「対応した」と書かないこと。
-- 未実装を実装済みと偽らない: 対応できない入力 (AABB 近似・複数 feed・
-  非一様メッシュ) は solver.log に warning を明示する。
+- 未実装を実装済みと偽らない: 対応できない入力 (幾何音響の AABB 近似・
+  複数 feed・非一様メッシュ・dx より細い剛体) は solver.log に warning を
+  明示する。
 
 ## CI
 

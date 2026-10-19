@@ -89,7 +89,11 @@ typedef struct {
 	int    ok;          /* 0 = 未知 shape (無視した) */
 	int    exact;       /* 1 = shape 1 (厳密)、0 = AABB 近似 */
 	int    surf0;       /* この障害物の 6 面の先頭 surf[] 添字 (無効なら -1) */
-	int    has_mat;     /* 1 = .ofdx acoustic.ga.obstacles で材質指定あり */
+	int    has_mat;     /* 1 = .ofdx で材質指定あり (下の mat_src のどちらか) */
+	/* 材質の出所 : 0 = なし、1 = acoustic.obstacles (FDTD と共有するキー)、
+	 * 2 = acoustic.ga.obstacles (幾何音響専用 — 1 より優先。既存入力の
+	 * 後方互換のため。JSON の並び順に依らない)。 */
+	int    mat_src;
 	double mat_alpha[GA_NBAND];  /* バンド別吸音率 (既定 0 = 剛体) */
 	double mat_scatter[GA_NBAND]; /* 散乱係数 (バンド別。[0] < 0 = 室の既定) */
 } ga_geom_t;

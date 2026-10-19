@@ -374,8 +374,11 @@ static int parse_receivers(ga_t *g, js_t *j)
  *                足りないバンドは最後の値で外挿)。省略 = 剛体のまま。
  *   scattering : 面ごとの散乱係数。省略 = 室の既定 (acoustic.ga.scattering)。
  * 未知キーは無視 (前方互換)。同じ geometry の行が複数なら最初を使う。 */
-static int parse_obstacle_row(ga_t *g, js_t *j)
+/* level : 1 = acoustic.obstacles (FDTD と共有)、2 = acoustic.ga.obstacles
+ * (幾何音響専用。同じ geometry に両方あれば 2 が勝つ) */
+static int parse_obstacle_row(ga_t *g, js_t *j, int level)
 {
+	const char *path = (level == 2) ? "acoustic.ga.obstacles" : "acoustic.obstacles";
 	char key[64];
 	double a[GA_NBAND], scat[GA_NBAND], v;
 	int acount = 0, idx = 0, enabled = 1, has_scat = 0, b;
@@ -410,8 +413,7 @@ static int parse_obstacle_row(ga_t *g, js_t *j)
 			}
 		}
 		else if (!strcmp(key, "scattering")) {
-			if (parse_scatter(g, j, scat, &has_scat,
-			                  "acoustic.ga.obstacles"))
+			if (parse_scatter(g, j, scat, &has_scat, path))
 				return 1;
 		}
 		else {
@@ -423,31 +425,41 @@ static int parse_obstacle_row(ga_t *g, js_t *j)
 	}
 	if (!enabled) return 0;
 	if (idx < 1 || idx > g->ngeom) {
-		ga_err(g, ".ofdx acoustic.ga.obstacles: geometry = %d does not match "
+		ga_err(g, ".ofdx %s: geometry = %d does not match "
 		       "any geometry line in the .ofd (it has %d — the index is "
 		       "1-based, same as \"geometry #N\" in solver.log)",
-		       idx, g->ngeom);
+		       path, idx, g->ngeom);
 		return 1;
 	}
 	{
 		ga_geom_t *o = &g->geom[idx - 1];
-		if (o->has_mat) {
-			ga_log(g, "warning: .ofdx acoustic.ga.obstacles has multiple rows "
-			       "for geometry #%d — using the first", idx);
+		if (o->mat_src == level) {
+			ga_log(g, "warning: .ofdx %s has multiple rows "
+			       "for geometry #%d — using the first", path, idx);
 			return 0;
 		}
+		if (o->mat_src == 2) {          /* level 1 : 幾何音響専用の行が優先 */
+			ga_log(g, ".ofdx: obstacle #%d — acoustic.ga.obstacles takes "
+			       "precedence over acoustic.obstacles (geometric solver only)",
+			       idx);
+			return 0;
+		}
+		if (o->mat_src == 1)            /* level 2 が level 1 を上書き */
+			ga_log(g, ".ofdx: obstacle #%d — acoustic.ga.obstacles overrides "
+			       "acoustic.obstacles (geometric solver only)", idx);
 		o->has_mat = 1;
+		o->mat_src = level;
 		for (b = 0; b < GA_NBAND; b++) {
 			o->mat_alpha[b] = (acount <= 0) ? 0.0
 			                : (b < acount) ? a[b] : a[acount - 1];
 			o->mat_scatter[b] = has_scat ? scat[b] : -1.0;
 		}
 		ga_log(g, ".ofdx: obstacle #%d material -> alpha = "
-		       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g], scattering = %s",
+		       "[%.4g %.4g %.4g %.4g %.4g %.4g %.4g], scattering = %s (%s)",
 		       idx, o->mat_alpha[0], o->mat_alpha[1], o->mat_alpha[2],
 		       o->mat_alpha[3], o->mat_alpha[4], o->mat_alpha[5],
 		       o->mat_alpha[6],
-		       has_scat ? "(per-obstacle)" : "(room default)");
+		       has_scat ? "(per-obstacle)" : "(room default)", path);
 	}
 	return 0;
 }
@@ -615,7 +627,7 @@ static int parse_ga(ga_t *g, js_t *j)
 			if (jpeek(j) == ']') { j->s++; }
 			else {
 				for (;;) {
-					if (parse_obstacle_row(g, j)) return 1;
+					if (parse_obstacle_row(g, j, 2)) return 1;
 					if (jpeek(j) == ',') { j->s++; continue; }
 					break;
 				}
@@ -689,6 +701,21 @@ static int walk_acoustic(ga_t *g, js_t *j)
 			 * あればそちらが勝つ (JSON の並び順に依らない)。 */
 			if (jbool(j, &bv)) return 1;
 			if (!g->angle_dep_ga) g->angle_dep = bv;
+		}
+		else if (!strcmp(key, "obstacles")) {
+			/* 障害物の材質 — acoustic 直下は FDTD と共有するキー (両ソルバーが
+			 * 同じ障害物を同じ材質で見る)。acoustic.ga.obstacles に同じ
+			 * geometry の行があればそちらが勝つ (parse_obstacle_row)。 */
+			if (jexpect(j, '[')) return 1;
+			if (jpeek(j) == ']') { j->s++; }
+			else {
+				for (;;) {
+					if (parse_obstacle_row(g, j, 1)) return 1;
+					if (jpeek(j) == ',') { j->s++; continue; }
+					break;
+				}
+				if (jexpect(j, ']')) return 1;
+			}
 		}
 		else if (!strcmp(key, "ga")) {
 			if (parse_ga(g, j)) return 1;
