@@ -432,6 +432,41 @@ int ac_setup(ac_t *ac)
 			       "125 Hz alpha for all walls", ac->fmax, AC_BAND_F0 / AC_SQRT2);
 	}
 
+	/* ── 音源の指向性 (.ofdx acoustic.feeds[].directivity / aim) : 実効 a は
+	 * 吸音率と同じく有効帯域と重なるバンドの平均 (低域担当なので高域の
+	 * 指向性を混ぜない)。a < 1 なのに向きが無い・0 ベクトルは非零終了。 ── */
+	if (ac->srcdir_bands) {
+		ac->srca = (double *)malloc((size_t)(ac->nfeed > 0 ? ac->nfeed : 1)
+		                            * sizeof(double));
+		if (!ac->srca) {
+			ac_err(ac, "out of memory (%d source directivities)", ac->nfeed);
+			return 1;
+		}
+		for (n = 0; n < ac->nfeed; n++) {
+			double sum = 0.0, *u = ac->srcaim + 3 * n, len;
+			int b;
+			for (b = 0; b < ac->alpha_nband; b++)
+				sum += ac->srcdir_bands[(size_t)n * AC_NBAND_OFDX + b];
+			ac->srca[n] = sum / ac->alpha_nband;
+			len = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+			if (ac->srca[n] < 1.0) {
+				if (!(len > 0.0)) {
+					ac_err(ac, ".ofdx acoustic.feeds[%d]: directivity a = %.4g "
+					       "(not omni) needs a non-zero \"aim\": [x, y, z] "
+					       "(the direction the source faces)", n + 1, ac->srca[n]);
+					return 1;
+				}
+				u[0] /= len; u[1] /= len; u[2] /= len;
+				ac_log(ac, "source #%d directivity: D = %.4g + %.4g cos(theta) "
+				       "(mean of %d band(s), <= %.4g Hz), aim = (%.4g, %.4g, %.4g)"
+				       " — monopole x %.4g + force dipole x %.4g", n + 1,
+				       ac->srca[n], 1.0 - ac->srca[n], ac->alpha_nband,
+				       ac->alpha_band_hi, u[0], u[1], u[2], ac->srca[n],
+				       1.0 - ac->srca[n]);
+			}
+		}
+	}
+
 	/* ── 障害物の材質 (.ofdx acoustic.obstacles[]) : 外壁と同じ規則で実効値
 	 * (有効帯域と重なるバンドの平均) を決める。指定なしは剛体 (alpha = 0)。 ── */
 	if (ac->ngeom > 0) {
@@ -955,6 +990,40 @@ int ac_run(ac_t *ac)
 			}
 		}
 
+		/* ── 指向性音源の力の双極子 (シリアル — 音源数ぶんだけ) :
+		 * D = a + (1-a) cos の (1-a) 分を、音源セルの両側の面に力として
+		 * 入れる (各面に半分ずつ — セル中心の点力)。単極子 (下の p への
+		 * 注入 x a) と同じ時間の進みにするため時刻は (n + 1/2) dt。
+		 * Δv = n_axis (1-a) gain s / (2 ρ c) は「遠方の軸上で単極と双極子が
+		 * 同じ振幅」になる規格化 (導出は data/sample/directivity.ofd の
+		 * 先頭コメント — 判定 (s) が番人)。動けない面 (剛体・外壁に接する面)
+		 * には入れない。a = 1 の音源は何もしない (従来とビット一致)。 ── */
+		if (ac->srca) {
+			const double tv = (n + 0.5) * ac->dt;
+			int si2;
+			for (si2 = 0; si2 < ac->nsrc; si2++) {
+				const double av = ac->srca[si2], *u = ac->srcaim + 3 * si2;
+				const int is = ac->srccell[3 * si2 + 0];
+				const int js = ac->srccell[3 * si2 + 1];
+				const int ks = ac->srccell[3 * si2 + 2];
+				double f;
+				size_t fi;
+				if (!(av < 1.0)) continue;
+				f = (1.0 - av) * ac->srcgain[si2]
+				  * src_pulse(ac, tv - ac->srcdelay[si2])
+				  / (2.0 * AC_RHO0 * AC_C0);
+				fi = ((size_t)ks * ny + js) * (nx + 1) + is;          /* x 面 */
+				if (mvx[fi]) vx[fi] += u[0] * f;
+				if (mvx[fi + 1]) vx[fi + 1] += u[0] * f;
+				fi = ((size_t)ks * (ny + 1) + js) * nx + is;          /* y 面 */
+				if (mvy[fi]) vy[fi] += u[1] * f;
+				if (mvy[fi + nx]) vy[fi + nx] += u[1] * f;
+				fi = ((size_t)ks * ny + js) * nx + is;                /* z 面 */
+				if (mvz[fi]) vz[fi] += u[2] * f;
+				if (mvz[fi + (size_t)nx * ny]) vz[fi + (size_t)nx * ny] += u[2] * f;
+			}
+		}
+
 		/* ── p 更新 : セルごとに独立 — リダクションなし。剛体セルは周囲の
 		 * v が 0 に固定されているため発散が 0 で自然に p = 0 のまま ── */
 #ifdef _OPENMP
@@ -981,12 +1050,17 @@ int ac_run(ac_t *ac)
 		{
 			const double t = (n + 1) * ac->dt;
 			int si2;
-			for (si2 = 0; si2 < ac->nsrc; si2++)
-				p[((size_t)ac->srccell[3 * si2 + 2] * ny
-				   + ac->srccell[3 * si2 + 1]) * nx
-				  + ac->srccell[3 * si2 + 0]] +=
-					ac->srcgain[si2]
-					* src_pulse(ac, t - ac->srcdelay[si2]);
+			for (si2 = 0; si2 < ac->nsrc; si2++) {
+				double *pc = &p[((size_t)ac->srccell[3 * si2 + 2] * ny
+				                 + ac->srccell[3 * si2 + 1]) * nx
+				                + ac->srccell[3 * si2 + 0]];
+				if (ac->srca && ac->srca[si2] < 1.0)   /* 指向性 : 単極子は x a */
+					*pc += ac->srca[si2] * ac->srcgain[si2]
+					     * src_pulse(ac, t - ac->srcdelay[si2]);
+				else
+					*pc += ac->srcgain[si2]
+					     * src_pulse(ac, t - ac->srcdelay[si2]);
+			}
 		}
 
 		/* ── 受音点記録 (サンプル n の時刻は (n+1)·dt — 1 サンプル未満の
@@ -1021,6 +1095,9 @@ void ac_free(ac_t *ac)
 	free(ac->srccell); ac->srccell = NULL;
 	free(ac->srcgain); ac->srcgain = NULL;
 	free(ac->srcdelay); ac->srcdelay = NULL;
+	free(ac->srcdir_bands); ac->srcdir_bands = NULL;
+	free(ac->srcaim); ac->srcaim = NULL;
+	free(ac->srca); ac->srca = NULL;
 	free(ac->recv);  ac->recv = NULL;
 	free(ac->freq1); ac->freq1 = NULL;
 	free(ac->p);     ac->p = NULL;

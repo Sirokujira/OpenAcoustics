@@ -34,6 +34,12 @@
 #define AC_GAIN_MAX   1000.0        /* |gain| の上限 (負は極性反転) */
 #define AC_DELAY_MAX  1.0           /* delay_s の上限 [s] (下限は 0) */
 
+/* 1 次指向性の名前 -> a (D = a + (1-a) cos)。幾何音響側 (ga.h) と同じ値 */
+#define AC_DIR_SUBCARDIOID   0.7
+#define AC_DIR_CARDIOID      0.5
+#define AC_DIR_SUPERCARDIOID 0.36602540378443865   /* (sqrt(3)-1)/2 : 前後比最大 */
+#define AC_DIR_HYPERCARDIOID 0.25                  /* 指向係数最大 */
+
 #define AC_PATH_MAX  4096
 #define AC_NAME_MAX  64
 #define AC_PI        3.14159265358979323846
@@ -165,6 +171,16 @@ typedef struct {
 	 * NULL のままなら全既定値 (setup が既定値で確保する)。 */
 	double *srcgain;                   /* nfeed 要素 (既定 1) */
 	double *srcdelay;                  /* nfeed 要素 [s] (既定 0) */
+	/* 音源の指向性 (.ofdx acoustic.feeds[].directivity / aim — OpenFDTD-X
+	 * ADR-0014)。1 次の指向性 D(theta) = a + (1-a) cos(theta) (theta は aim
+	 * からの角度)、正面 (theta = 0) で D = 1 = 無指向と同じ振幅に規格化。
+	 * NULL = 全 feed 無指向 (従来動作)。幾何音響側と同じキー・同じ意味。
+	 * 実装は単極子 (圧力の注入 x a) + 力の双極子 (速度の注入 x (1-a)、向き aim)
+	 * の重ね合わせ — 線形系なので遠方で D(theta) になる (近距離場の
+	 * 1/(ikr) 項も点音源の厳密解どおり)。 */
+	double *srcdir_bands;              /* nfeed * AC_NBAND_OFDX : バンド別の a (既定 1) */
+	double *srcaim;                    /* nfeed * 3 : 向き (setup で正規化。0 = 未指定) */
+	double *srca;                      /* nfeed : 実効 a (有効帯域内のバンド平均) */
 
 	/* 境界係数 (半陰的局所インピーダンス更新 v+ = wA v- ± wB p) */
 	int    wrigid[AC_NWALL];  /* 1 = 剛壁 (更新しない) */

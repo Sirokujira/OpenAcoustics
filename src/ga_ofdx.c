@@ -476,6 +476,69 @@ static int parse_obstacle_row(ga_t *g, js_t *j, int level)
  * 意味も並びも別物だから (あちらは GUI が置いた音源、こちらは .ofd の
  * feed 行)。両者を同じキーに載せると、GUI 側が gain 列を足した瞬間に
  * ソルバーが黙って別の意味で読む。 */
+/* acoustic.feeds[].directivity の値 -> バンド別の a[GA_NBAND] (D = a + (1-a) cos)。
+ * 名前 (omni / subcardioid / cardioid / supercardioid / hypercardioid /
+ * figure8)、数値 a (0..1)、またはバンド別の配列 (125 Hz .. 4 kHz の 6 値まで。
+ * 足りないバンドと 8 kHz は最後の値で外挿 — 吸音率と同じ規則)。範囲外・
+ * 未知の名前は非零終了。FDTD 側 (input_ofdx.c) と同じ規則。 */
+static int parse_directivity(ga_t *g, js_t *j, int idx, double a[GA_NBAND])
+{
+	int b, n = 0;
+	double v;
+	if (jpeek(j) == '"') {
+		char name[32];
+		if (jstring(j, name, sizeof(name))) return 1;
+		if (!strcmp(name, "omni")) v = 1.0;
+		else if (!strcmp(name, "subcardioid")) v = GA_DIR_SUBCARDIOID;
+		else if (!strcmp(name, "cardioid")) v = GA_DIR_CARDIOID;
+		else if (!strcmp(name, "supercardioid")) v = GA_DIR_SUPERCARDIOID;
+		else if (!strcmp(name, "hypercardioid")) v = GA_DIR_HYPERCARDIOID;
+		else if (!strcmp(name, "figure8")) v = 0.0;
+		else {
+			ga_err(g, ".ofdx acoustic.feeds[%d].directivity = \"%s\" is not a "
+			       "known pattern (omni, subcardioid, cardioid, supercardioid, "
+			       "hypercardioid, figure8 — or a number 0..1 = a in "
+			       "D = a + (1-a) cos)", idx + 1, name);
+			return 1;
+		}
+		for (b = 0; b < GA_NBAND; b++) a[b] = v;
+		return 0;
+	}
+	if (jpeek(j) == '[') {
+		j->s++;
+		if (jpeek(j) == ']') {
+			ga_err(g, ".ofdx acoustic.feeds[%d].directivity is an empty array",
+			       idx + 1);
+			return 1;
+		}
+		for (;;) {
+			if (jnumber(j, &v)) return 1;
+			if (!(v >= 0.0 && v <= 1.0)) {
+				ga_err(g, ".ofdx acoustic.feeds[%d].directivity[%d] = %g is out "
+				       "of range (0 .. 1 = a in D = a + (1-a) cos)", idx + 1,
+				       n + 1, v);
+				return 1;
+			}
+			if (n < GA_NBAND - 1) a[n] = v;     /* 6 バンド (125 Hz .. 4 kHz) まで */
+			n++;
+			if (jpeek(j) == ',') { j->s++; continue; }
+			break;
+		}
+		if (jexpect(j, ']')) return 1;
+		if (n > GA_NBAND - 1) n = GA_NBAND - 1;
+		for (b = n; b < GA_NBAND; b++) a[b] = a[n - 1];
+		return 0;
+	}
+	if (jnumber(j, &v)) return 1;
+	if (!(v >= 0.0 && v <= 1.0)) {
+		ga_err(g, ".ofdx acoustic.feeds[%d].directivity = %g is out of range "
+		       "(0 .. 1 = a in D = a + (1-a) cos)", idx + 1, v);
+		return 1;
+	}
+	for (b = 0; b < GA_NBAND; b++) a[b] = v;
+	return 0;
+}
+
 static int parse_feeds(ga_t *g, js_t *j)
 {
 	int idx = 0, warned = 0, b;
@@ -495,6 +558,9 @@ static int parse_feeds(ga_t *g, js_t *j)
 	for (;;) {
 		char key[64];
 		double gain = 1.0, delay = 0.0, v;
+		double dir[GA_NBAND], aim[3] = { 0.0, 0.0, 0.0 };
+		int has_dir = 0, has_aim = 0;
+		for (b = 0; b < GA_NBAND; b++) dir[b] = 1.0;
 		if (jexpect(j, '{')) return 1;
 		if (jpeek(j) == '}') { j->s++; }
 		else {
@@ -522,6 +588,28 @@ static int parse_feeds(ga_t *g, js_t *j)
 					}
 					delay = v;
 				}
+				else if (!strcmp(key, "directivity")) {
+					if (parse_directivity(g, j, idx, dir)) return 1;
+					has_dir = 1;
+				}
+				else if (!strcmp(key, "aim")) {
+					int c = 0;
+					if (jexpect(j, '[')) return 1;
+					for (;;) {
+						if (jnumber(j, &v)) return 1;
+						if (c < 3) aim[c] = v;
+						c++;
+						if (jpeek(j) == ',') { j->s++; continue; }
+						break;
+					}
+					if (jexpect(j, ']')) return 1;
+					if (c != 3) {
+						ga_err(g, ".ofdx acoustic.feeds[%d].aim must be a "
+						       "3-vector [x, y, z] (got %d values)", idx + 1, c);
+						return 1;
+					}
+					has_aim = 1;
+				}
 				else {
 					if (jskip(j)) return 1;   /* 未知キー (前方互換) */
 				}
@@ -535,6 +623,26 @@ static int parse_feeds(ga_t *g, js_t *j)
 			g->srcdelay[idx] = delay;
 			ga_log(g, ".ofdx: feed #%d -> gain = %.4g, delay = %.4g s",
 			       idx + 1, gain, delay);
+			if (has_dir || has_aim) {
+				if (!g->srcdir) {
+					size_t nf = (size_t)g->nfeed;
+					g->srcdir = (double *)malloc(nf * GA_NBAND * sizeof(double));
+					g->srcaim = (double *)calloc(nf * 3, sizeof(double));
+					if (!g->srcdir || !g->srcaim) {
+						ga_err(g, "out of memory (acoustic.feeds directivity)");
+						return 1;
+					}
+					for (b = 0; b < g->nfeed * GA_NBAND; b++) g->srcdir[b] = 1.0;
+				}
+				for (b = 0; b < GA_NBAND; b++)
+					g->srcdir[(size_t)idx * GA_NBAND + b] = dir[b];
+				for (b = 0; b < 3; b++) g->srcaim[3 * idx + b] = aim[b];
+				ga_log(g, ".ofdx: feed #%d -> directivity a = [%.4g %.4g %.4g "
+				       "%.4g %.4g %.4g %.4g] (D = a + (1-a) cos, 125 Hz .. 8 kHz), "
+				       "aim = %s(%.4g, %.4g, %.4g)", idx + 1, dir[0], dir[1],
+				       dir[2], dir[3], dir[4], dir[5], dir[6],
+				       has_aim ? "" : "unset ", aim[0], aim[1], aim[2]);
+			}
 		}
 		else if (!warned) {
 			ga_log(g, "warning: .ofdx acoustic.feeds has more entries than "

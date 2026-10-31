@@ -306,6 +306,34 @@ int ga_setup(ga_t *g)
 	for (si2 = 0; si2 < g->nsrc; si2++)
 		if (g->srcdelay[si2] > g->delay_max) g->delay_max = g->srcdelay[si2];
 
+	/* ── 音源の指向性 (ADR-0014) : どこかのバンドで a < 1 なら向きが要る
+	 * (0 ベクトル・未指定は非零終了 — 黙って無指向にしない)。向きは正規化。 ── */
+	if (g->srcdir) {
+		for (n = 0; n < g->nfeed; n++) {
+			double *u = g->srcaim + 3 * n, len;
+			int b, directional = 0;
+			for (b = 0; b < GA_NBAND; b++)
+				if (g->srcdir[(size_t)n * GA_NBAND + b] < 1.0) directional = 1;
+			if (!directional) continue;
+			len = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+			if (!(len > 0.0)) {
+				ga_err(g, ".ofdx acoustic.feeds[%d]: a directivity other than "
+				       "omni needs a non-zero \"aim\": [x, y, z] (the direction "
+				       "the source faces)", n + 1);
+				return 1;
+			}
+			u[0] /= len; u[1] /= len; u[2] /= len;
+			ga_log(g, "source #%d directivity: D_b = a_b + (1-a_b) cos(theta), "
+			       "a = [%.4g %.4g %.4g %.4g %.4g %.4g %.4g] (125 Hz .. 8 kHz), "
+			       "aim = (%.4g, %.4g, %.4g); direct sound / images x D_b, "
+			       "ray energy x D_b^2", n + 1,
+			       g->srcdir[(size_t)n * GA_NBAND + 0], g->srcdir[(size_t)n * GA_NBAND + 1],
+			       g->srcdir[(size_t)n * GA_NBAND + 2], g->srcdir[(size_t)n * GA_NBAND + 3],
+			       g->srcdir[(size_t)n * GA_NBAND + 4], g->srcdir[(size_t)n * GA_NBAND + 5],
+			       g->srcdir[(size_t)n * GA_NBAND + 6], u[0], u[1], u[2]);
+		}
+	}
+
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
 	for (si2 = 0; si2 < g->nsrc; si2++) {
 		double sx = g->feedpos[3 * si2 + 0];

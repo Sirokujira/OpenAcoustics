@@ -28,7 +28,7 @@ WAV / JSON / FFT は自前実装 — 追加しないこと)。
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"        # bin/ に 2 本できる
 
-# 検証 : 解析解との比較 165 判定 (FDTD 82 + 幾何音響 83)。1 本のスクリプトが
+# 検証 : 解析解との比較 189 判定 (FDTD 91 + 幾何音響 98)。1 本のスクリプトが
 # 両ソルバーを判定する (第 3 引数を省略すると実行ファイル名の fdtd -> ga
 # 置換で幾何音響側を探すので、CI の呼び出しは変えなくてよい)
 sh data/sample/acoustic_check.sh "$PWD/bin/ofdx_acoustic_fdtd" /tmp/ac-check
@@ -40,7 +40,7 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 ./bin/ofdx_acoustic_ga /tmp/ga-hall && grep "normal end" /tmp/ga-hall/solver.log
 ```
 
-「ビルドが通る」は合格条件ではない。**165 判定すべて OK でなければ完了ではない**
+「ビルドが通る」は合格条件ではない。**189 判定すべて OK でなければ完了ではない**
 (この検証群が物理と契約の番人になっている)。バイナリは `bin/` に出る
 (CMakeLists が固定)。sanitize ビルド (CI と同じ ASan+UBSan) も `bin/` を
 上書きするので、検証後は Release を作り直すこと。
@@ -150,6 +150,20 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
    `acoustic.ga.obstacles[]` は読まない (`acoustic.ga` は丸ごと読み飛ばす
    規約 — そちらだけの既存入力で FDTD の結果を変えないため)。
 
+10. **音源の指向性は opt-in で、両ソルバー対称**: 契約は OpenFDTD-X の
+   ADR-0014。`.ofdx` の `acoustic.feeds[i].directivity` (名前 omni /
+   subcardioid 0.7 / cardioid 0.5 / supercardioid (√3−1)/2 / hypercardioid
+   0.25 / figure8 0、数値 a、またはバンド別の配列) と `aim` = [x, y, z] で
+   D(θ) = a + (1−a) cosθ (軸上 D(0) = 1)。FDTD は単極 (ソフト音源) を
+   a 倍し、音源セルの各軸 2 面の粒子速度に力の双極子
+   (1−a) n s(t_v)/(2ρc) (t_v = (n+½)dt、マスク面は飛ばす) を足す。
+   この係数が「遠方の軸上で単極と双極子が同じ振幅」の規格化なので変えない
+   (番人は (s) — 点モノポール + 点力双極子の近接場込みの閉形式)。a は
+   **有効帯域内のバンド平均** (3b と同じ規則 — 幾何音響はバンド別のまま)。
+   a < 1 で aim が無い / 0 ベクトル、未知の名前、範囲外は非零終了。
+   無指向 (キー省略・omni・全バンド 1) は双極子の経路に入らず、従来と
+   rir.wav がビット一致する。
+
 ## 幾何音響 (ofdx_acoustic_ga) の不変条件 — 番人は acoustic_check.sh の (A)〜(G)
 
 1. **振幅規約**: 自由音場の直接音が **1/(4πr)**。離散 RIR ではこれを
@@ -209,6 +223,14 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 12. **数値を捏造しない**: 室外/剛体内の音源・受音点、`.ofdx` の値域外
    (`image_order` = 9 等) は非零終了 + stderr に理由。既定値に黙って
    落とさない ((G))。
+13. **音源の指向性** (ADR-0014、FDTD 側の不変条件 10 と同じ定義・同じ
+   キー): 直接音と鏡像の振幅に放射方向 (鏡像は再構成した経路の最初の区間
+   pts[depth] − src) の D_b = a_b + (1−a_b) cosθ、レイのエネルギーに
+   発射方向の D_b² を掛ける。振幅に D、エネルギーに D² — 片方だけ変えると
+   直接音と残響のバランスが崩れる (番人は (M) — バンド中心 DFT の符号つき
+   D_b と、無損失室の後期エネルギー比 = D² の球面平均 a² + (1−a)²/3)。
+   負の D (背面ローブ) は極性反転として残す。バンドは 125 Hz〜4 kHz の
+   6 値で、8 kHz は最後の値の外挿。
 
 ## 移植性の絶対規則 (OpenPEEC portability.md を踏襲 — MSVC で実際に踏んだもの)
 
@@ -249,9 +271,9 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 - 幾何音響の拡張は `.ofdx` の `acoustic.ga` に足す (未知キー無視を保つ)。
   FDTD 側は `acoustic.ga` を未知キーとして読み飛ばすので、1 つの `.ofdx` を
   両ソルバーで共有できる。**この性質を壊さないこと**。
-- 幾何音響で未対応のもの (非直方体の室・回折・音源の指向性) は ReadMe の
-  「幾何音響の制約」に書いてある。音源ごとのゲイン・遅延は
-  `.ofdx` の `acoustic.feeds[]` で対応済み (ADR-0010 Decision 7 —
+- 幾何音響で未対応のもの (非直方体の室・回折・1 次を超える音源の指向性) は
+  ReadMe の「幾何音響の制約」に書いてある。音源ごとのゲイン・遅延・指向性は
+  `.ofdx` の `acoustic.feeds[]` で対応済み (ADR-0010 Decision 7 / ADR-0014 —
   両ソルバー対称。キー名は GUI が `acoustic.sources` を音源一覧として
   既に使っているため分けてある — 混ぜると静かに誤読する)。バンド別の散乱係数は `scattering` の配列指定で対応済み
   (基準確率での抽選 + バンド別の重み付け — 不変条件 6)。障害物の材質は

@@ -696,6 +696,131 @@ else
 	say_ng "fdtd bad delay_s exit" " (no reason in stderr)"
 fi
 
+echo "--- (s) source directivity (.ofdx acoustic.feeds[].directivity / aim, ADR-0014)"
+# D = a + (1-a) cos(theta) を「a 倍の単極 + 力の双極子」で実現する。期待値は
+# 点モノポール + 点力双極子の自由音場の閉形式 (双極子の近接場項 1/(ikr) を
+# 含む)。導出・配置・許容 (最大差 0.01) の根拠は directivity.ofd の先頭コメント。
+# fd_dirpat <case dir> <a> <ux> <uy> <uz> : 6 受音点の |X(f)| r を #1 で
+#   正規化した実測と、閉形式 |F_i|/|F_1| の最大差を出す
+fd_dirpat() {
+	for _k in 1 2 3 4 5 6; do
+		if [ "$_k" = 1 ]; then dump "$1/rir.wav"; else dump "$1/rir_$_k.wav"; fi > "$1/p$_k.txt"
+	done
+	_t0=$(sed -n 's/.*"t0_s": \([0-9.eE+-]*\).*/\1/p' "$1/metadata.json")
+	_sg=$(sed -n 's/.*"sigma_s": \([0-9.eE+-]*\).*/\1/p' "$1/metadata.json")
+	_fs=$(sed -n 's/.*"sample_rate": \([0-9]*\).*/\1/p' "$1/metadata.json")
+	paste "$1/p1.txt" "$1/p2.txt" "$1/p3.txt" "$1/p4.txt" "$1/p5.txt" "$1/p6.txt" |
+	awk -v a="$2" -v ux="$3" -v uy="$4" -v uz="$5" -v t0="$_t0" -v sg="$_sg" \
+	    -v fs="$_fs" -v pi="$PI" '
+		BEGIN {
+			c = 343.0; dx = 5.0; f = c / (40 * dx); w = 2 * pi * f; k = w / c;
+			ul = sqrt(ux * ux + uy * uy + uz * uz);
+			split("20 14 0 -14 -20 0", ox, " "); split("0 14 20 14 0 0", oy, " ");
+			split("0 0 0 0 0 20", oz, " ");
+			for (m = 1; m <= 6; m++) {
+				r[m] = dx * sqrt(ox[m] * ox[m] + oy[m] * oy[m] + oz[m] * oz[m]);
+				cs = dx * (ox[m] * ux + oy[m] * uy + oz[m] * uz) / (ul * r[m]);
+				re = a + (1 - a) * cs; im = -(1 - a) * cs / (k * r[m]);
+				F[m] = sqrt(re * re + im * im);
+			}
+		}
+		{	t = NR / fs;   # 記録 n (1 始まり) は t = n dt
+			for (m = 1; m <= 6; m++) {
+				tc = t0 + r[m] / c;
+				if (t > tc - 4 * sg && t < tc + 4 * sg) {
+					xr[m] += $m * cos(w * t); xi[m] -= $m * sin(w * t)
+				}
+			} }
+		END {
+			ref = sqrt(xr[1] * xr[1] + xi[1] * xi[1]) * r[1]; mx = 0;
+			for (m = 1; m <= 6; m++) {
+				d = sqrt(xr[m] * xr[m] + xi[m] * xi[m]) * r[m] / ref - F[m] / F[1];
+				if (d < 0) d = -d; if (d > mx) mx = d;
+			}
+			printf "%.6f", mx
+		}'
+}
+run_case directivity directivity.ofd directivity.ofdx && {
+	chkabs "fdtd figure8 pattern" "$(fd_dirpat "$WORK/directivity" 0 1 1 1)" 0 0.01 "(max diff)"
+	grep -Fq '"directivity_a": 0, "aim": [0.5773502692, 0.5773502692, 0.5773502692]' \
+		"$WORK/directivity/metadata.json" \
+		&& say_ok "fdtd directivity metadata" || say_ng "fdtd directivity metadata"
+}
+# 変種 : バンド別の配列 [0.5, 0, ...] — 有効帯域 (fmax = 6.86 Hz) 内は 125 Hz
+# だけなので a = 0.5 (カーディオイド) が正しい (不変条件 3b と同じバンド選択)。
+# aim は長さ 2 で与える (向きだけが効く — 正規化を忘れると双極子が 2 倍。
+# 8 の字の本体は #1 正規化で倍率が相殺されるので、この変種が番人)
+rm -rf "$WORK/directivity_band"; mkdir -p "$WORK/directivity_band"
+cp "$SRC/directivity.ofd" "$WORK/directivity_band/"
+sed 's/"directivity": "figure8", "aim": \[1, 1, 1\]/"directivity": [0.5, 0, 0, 0, 0, 0], "aim": [2, 0, 0]/' \
+	"$SRC/directivity.ofdx" > "$WORK/directivity_band/directivity.ofdx"
+if "$SOLVER" "$WORK/directivity_band" > /dev/null 2>&1; then
+	chkabs "fdtd in-band cardioid" "$(fd_dirpat "$WORK/directivity_band" 0.5 1 0 0)" 0 0.01 "(max diff)"
+else
+	say_ng "fdtd in-band cardioid" " (solver failed)"
+fi
+# 無指向の明示 ("omni" と全バンド 1 の配列) は指定なしとビット一致 (後方互換)
+rm -rf "$WORK/super_omni"; mkdir -p "$WORK/super_omni"
+cp "$SRC/super2.ofd" "$WORK/super_omni/"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_omni/super2.ofdx" \
+	'[ { "directivity": "omni" }, { "directivity": [1, 1, 1, 1, 1, 1], "aim": [0, 0, 1] } ]'
+if "$SOLVER" "$WORK/super_omni" > /dev/null 2>&1 && \
+   cmp -s "$WORK/super_omni/rir.wav" "$WORK/super_ab/rir.wav"; then
+	say_ok "fdtd explicit omni" " (rir.wav bit-identical to no directivity)"
+else
+	say_ng "fdtd explicit omni" " (rir.wav differs from no directivity)"
+fi
+# 音源ごとの指向性も線形 : 2 音源 (カーディオイド +x / 8 の字 +z) の同時発火 =
+# それぞれ単独の和 ((h) と同じ判定、音源と指向性の対応づけの番人)
+for v in dab da db; do rm -rf "$WORK/super_$v"; mkdir -p "$WORK/super_$v"; done
+cp "$SRC/super2.ofd" "$WORK/super_dab/"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_dab/super2.ofdx" \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0] }, { "directivity": "figure8", "aim": [0, 0, 1] } ]'
+grep -v "^feed = z 3.15" "$SRC/super2.ofd" > "$WORK/super_da/super2.ofd"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_da/super2.ofdx" \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0] } ]'
+grep -v "^feed = z 0.55" "$SRC/super2.ofd" > "$WORK/super_db/super2.ofd"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_db/super2.ofdx" \
+	'[ { "directivity": "figure8", "aim": [0, 0, 1] } ]'
+sup_ok=1
+for v in dab da db; do
+	"$SOLVER" "$WORK/super_$v" > /dev/null 2>&1 || sup_ok=0
+done
+if [ "$sup_ok" = "1" ]; then
+	for v in dab da db; do dump "$WORK/super_$v/rir.wav" > "$WORK/super_$v/rir.txt"; done
+	paste "$WORK/super_dab/rir.txt" "$WORK/super_da/rir.txt" "$WORK/super_db/rir.txt" | awk \
+		'{ dd = $1 - ($2 + $3); e2 += dd * dd; r2 += $1 * $1 }
+		END {
+			rel = sqrt(e2 / r2);
+			printf "%-26s L2 rel err=%.3e -> %s (<= 1e-5)\n", "fdtd directional superpos", rel, (rel <= 1e-5) ? "OK" : "NG";
+			exit (rel <= 1e-5) ? 0 : 1
+		}' || status=1
+else
+	say_ng "fdtd directional superpos" " (solver failed)"
+fi
+# 不正な指定は無指向に落とさず非零終了 (数値を捏造しない)
+# dir_refuse <solver> <label> <case> <ofd> <ofdx> <feeds 配列> <stderr に要る語>
+dir_refuse() {
+	_dd="$WORK/$3"; rm -rf "$_dd"; mkdir -p "$_dd"
+	cp "$SRC/$4" "$_dd/"
+	mk_feeds "$SRC/$5" "$_dd/$5" "$6"
+	if "$1" "$_dd" > /dev/null 2> "$_dd/stderr.log"; then
+		say_ng "$2" " (should fail)"
+	elif grep -qi "$7" "$_dd/stderr.log" && [ ! -f "$_dd/rir.wav" ]; then
+		printf "%-26s -> OK (refused with the offending key)\n" "$2"
+	else
+		say_ng "$2" " (no reason in stderr)"
+	fi
+}
+dir_refuse "$SOLVER" "fdtd directivity no aim" super_dnoaim super2.ofd super2.ofdx \
+	'[ { "directivity": "cardioid" } ]' '"aim"'
+dir_refuse "$SOLVER" "fdtd directivity bad name" super_dname super2.ofd super2.ofdx \
+	'[ { "directivity": "shotgun", "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$SOLVER" "fdtd directivity range" super_drange super2.ofd super2.ofdx \
+	'[ { "directivity": [0.5, 1.5], "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$SOLVER" "fdtd directivity aim len" super_daim super2.ofd super2.ofdx \
+	'[ { "directivity": 0.5, "aim": [1, 0] } ]' 'aim'
+
 ###############################################################################
 # ofdx_acoustic_ga (幾何音響、高域担当) の検証
 #
@@ -1298,6 +1423,125 @@ elif grep -qi "scattering" "$WORK/ga_bscat_bad/stderr.log" && \
 else
 	say_ng "ga band-scat bad value" " (no reason in stderr)"
 fi
+
+echo "--- (M) source directivity (.ofdx acoustic.feeds[].directivity / aim, ADR-0014)"
+# D_b = a_b + (1-a_b) cos(theta) をバンド別に。直接音・鏡像は振幅に D_b、
+# レイはエネルギーに D_b^2。導出・配置・許容の根拠は ga_directivity.ofd の
+# 先頭コメント。バンド中心の DFT から遅延の位相を戻した実部 x 4 pi r が
+# 符号つきの D_b(theta) になる。
+ga_run ga_directivity ga_directivity.ofd ga_directivity.ofdx && {
+	d="$WORK/ga_directivity"
+	for v in on_axis side rear top deg45 deg135; do dump "$d/rir_$v.wav" > "$d/$v.txt"; done
+	ga_dirpat() {   # ga_dirpat <f> <a> <ratio(0|1)> : 6 受音点の最大差
+		paste "$d/on_axis.txt" "$d/side.txt" "$d/rear.txt" "$d/top.txt" \
+		      "$d/deg45.txt" "$d/deg135.txt" |
+		awk -v f0="$1" -v a="$2" -v rt="$3" -v pi="$PI" '
+			BEGIN {
+				split("7 7 -7 0 10 -10", ox, " "); split("7 -7 -7 0 0 0", oy, " ");
+				split("0 0 0 10 0 0", oz, " "); w = 2 * pi * f0 / 48000;
+				for (m = 1; m <= 6; m++) {
+					r[m] = sqrt(ox[m] * ox[m] + oy[m] * oy[m] + oz[m] * oz[m]);
+					E[m] = a + (1 - a) * (ox[m] + oy[m]) / (sqrt(2) * r[m]);
+				}
+			}
+			{ n = NR - 1; for (m = 1; m <= 6; m++) {
+				xr[m] += $m * cos(w * n); xi[m] -= $m * sin(w * n) } }
+			END {
+				for (m = 1; m <= 6; m++) {
+					ph = 2 * pi * f0 * r[m] / 343.0;
+					D[m] = (xr[m] * cos(ph) - xi[m] * sin(ph)) * 4 * pi * r[m];
+				}
+				for (m = 1; m <= 6; m++) {
+					v = rt ? D[m] / D[1] : D[m];
+					dd = v - E[m]; if (dd < 0) dd = -dd; if (dd > mx) mx = dd;
+				}
+				printf "%.6f", mx
+			}'
+	}
+	chkabs "ga dir 125 Hz omni"       "$(ga_dirpat 125 1 0)"    0 0.01 "(max diff)"
+	chkabs "ga dir 1 kHz cardioid"    "$(ga_dirpat 1000 0.5 0)" 0 0.01 "(max diff)"
+	chkabs "ga dir 4 kHz figure8"     "$(ga_dirpat 4000 0 0)"   0 0.01 "(max diff)"
+	chkabs "ga dir 8 kHz extrapolate" "$(ga_dirpat 8000 0 1)"   0 0.01 "(max diff)"
+	grep -Fq '"directivity": [1, 1, 0.5, 0.5, 0, 0, 0], "aim": [0.7071067812, 0.7071067812, 0]' \
+		"$d/metadata.json" \
+		&& say_ok "ga directivity metadata" || say_ng "ga directivity metadata"
+}
+# 残響エネルギー : 無損失室の後期窓 [0.3, 0.9) s の平均自乗圧は総放射パワー
+# (D^2 の球面平均 a^2 + (1-a)^2/3) に比例 — 無指向 (E) との比
+# カーディオイド 1/3、ハイパーカーディオイド (斜め向き) 1/4、±3%
+for v in card:cardioid:0,0,1:0.3333333333 hyper:hypercardioid:1,2,3:0.25; do
+	nm=${v%%:*}; rest=${v#*:}; pat=${rest%%:*}; rest=${rest#*:}
+	aim=${rest%%:*}; ex=${rest#*:}
+	dd="$WORK/ga_lossless_$nm"; rm -rf "$dd"; mkdir -p "$dd"
+	cp "$SRC/ga_lossless.ofd" "$dd/"
+	sed "s/\"acoustic\": {/\"acoustic\": { \"feeds\": [ { \"directivity\": \"$pat\", \"aim\": [$aim] } ],/" \
+		"$SRC/ga_lossless.ofdx" > "$dd/ga_lossless.ofdx"
+	if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+		dump "$dd/rir.wav" > "$dd/rir.txt"
+		chk "ga $pat power" "$(paste "$dd/rir.txt" "$WORK/ga_lossless/rir.txt" | awk '
+			{ t = (NR - 1) / 48000;
+			  if (t >= 0.30 && t < 0.90) { e1 += $1 * $1; e0 += $2 * $2 } }
+			END { printf "%.10f", e1 / e0 }')" "$ex" 0.03
+	else
+		say_ng "ga $pat power" " (solver failed)"
+	fi
+done
+# レイ側の音源ごとの対応づけ : ga_lossless に 2 個目の音源 (6.5, 1.5, 4.0) を
+# 足し、無指向 + カーディオイドで同時発火。後期のエネルギーは音源ごとの
+# 総パワーの和なので、単一無指向 (E) との比は 1 + 1/3 = 4/3 (無損失室の
+# 後期エネルギー密度は音源位置によらない — 2 個目の位置差は統計の 1% 程度)
+dd="$WORK/ga_lossless_two"; rm -rf "$dd"; mkdir -p "$dd"
+sed 's/^feed = z 2.0 2.0 2.0 1.0 0.0 50.0/&\
+feed = z 6.5 1.5 4.0 1.0 0.0 50.0/' "$SRC/ga_lossless.ofd" > "$dd/ga_lossless.ofd"
+sed 's/"acoustic": {/"acoustic": { "multi_source": true, "feeds": [ { "directivity": "omni" }, { "directivity": "cardioid", "aim": [0, 1, 0] } ],/' \
+	"$SRC/ga_lossless.ofdx" > "$dd/ga_lossless.ofdx"
+if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+	dump "$dd/rir.wav" > "$dd/rir.txt"
+	chk "ga two-src ray power" "$(paste "$dd/rir.txt" "$WORK/ga_lossless/rir.txt" | awk '
+		{ t = (NR - 1) / 48000;
+		  if (t >= 0.30 && t < 0.90) { e1 += $1 * $1; e0 += $2 * $2 } }
+		END { printf "%.10f", e1 / e0 }')" 1.3333333333 0.03
+else
+	say_ng "ga two-src ray power" " (solver failed)"
+fi
+# 音源ごとの対応づけ : ga_two の 2 音源に 8 の字 (aim -x、受音点は真後ろ =
+# 極性反転 -1) とハイパーカーディオイド (aim +y、受音点は真横 = a = 1/4) —
+# 閉形式は #1 : -1/(4 pi 10)、#2 : 0.25/(4 pi 20) (全バンド同じ a なので
+# 標本和で読める。取り違えると #1 が 0.25、#2 が 1 になる)
+rm -rf "$WORK/ga_two_dir"; mkdir -p "$WORK/ga_two_dir"
+cp "$SRC/ga_two.ofd" "$WORK/ga_two_dir/"
+mk_feeds "$SRC/ga_two.ofdx" "$WORK/ga_two_dir/ga_two.ofdx" \
+	'[ { "directivity": "figure8", "aim": [-1, 0, 0] }, { "directivity": "hypercardioid", "aim": [0, 1, 0] } ]'
+if "$GA_SOLVER" "$WORK/ga_two_dir" > /dev/null 2>&1; then
+	dump "$WORK/ga_two_dir/rir.wav" > "$WORK/ga_two_dir/rir.txt"
+	t1=$(awk 'BEGIN{printf "%.10f", 10.0/343.0}')
+	t2=$(awk 'BEGIN{printf "%.10f", 20.0/343.0}')
+	chk "ga dir #1 figure8 rear" "$(ga_sum "$WORK/ga_two_dir/rir.txt" "$t1" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", -1/(4*pi*10.0)}')" 0.01
+	chk "ga dir #2 hyper side" "$(ga_sum "$WORK/ga_two_dir/rir.txt" "$t2" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 0.25/(4*pi*20.0)}')" 0.01
+else
+	say_ng "ga dir two-source" " (solver failed)"
+fi
+# 無指向の明示は指定なしとビット一致 (後方互換)
+rm -rf "$WORK/ga_omni"; mkdir -p "$WORK/ga_omni"
+cp "$SRC/ga_two.ofd" "$WORK/ga_omni/"
+mk_feeds "$SRC/ga_two.ofdx" "$WORK/ga_omni/ga_two.ofdx" \
+	'[ { "directivity": "omni" }, { "directivity": [1, 1, 1, 1, 1, 1], "aim": [0, 0, 1] } ]'
+if "$GA_SOLVER" "$WORK/ga_omni" > /dev/null 2>&1 && \
+   cmp -s "$WORK/ga_omni/rir.wav" "$WORK/ga_two/rir.wav"; then
+	say_ok "ga explicit omni" " (rir.wav bit-identical to no directivity)"
+else
+	say_ng "ga explicit omni" " (rir.wav differs from no directivity)"
+fi
+dir_refuse "$GA_SOLVER" "ga directivity no aim" ga_dnoaim ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": [1, 1, 1, 1, 1, 0] } ]' '"aim"'
+dir_refuse "$GA_SOLVER" "ga directivity bad name" ga_dname ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": "shotgun", "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$GA_SOLVER" "ga directivity range" ga_drange ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": -0.25, "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$GA_SOLVER" "ga directivity aim len" ga_daim ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0, 1] } ]' 'aim'
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
 # 乱数生成器を使わない (レイ方向は球面フィボナッチ格子、拡散反射の抽選は

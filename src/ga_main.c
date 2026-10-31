@@ -79,6 +79,8 @@ void ga_free(ga_t *g)
 	free(g->feedpos); g->feedpos = NULL;
 	free(g->srcgain); g->srcgain = NULL;
 	free(g->srcdelay); g->srcdelay = NULL;
+	free(g->srcdir); g->srcdir = NULL;
+	free(g->srcaim); g->srcaim = NULL;
 	free(g->recv); g->recv = NULL;
 	free(g->echo); g->echo = NULL;
 	free(g->rir);  g->rir  = NULL;

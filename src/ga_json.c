@@ -102,14 +102,29 @@ int ga_write_metadata(ga_t *g)
 	 * gain / delay_s (Decision 7) はキー追加のみ (既定 1 / 0)。 */
 	fprintf(fp, "  \"multi_source\": %s,\n", g->multi_source ? "true" : "false");
 	fprintf(fp, "  \"sources\": [\n");
+	/* directivity / aim (ADR-0014) も追加キー : バンド別の a (D = a + (1-a) cos、
+	 * 125 Hz .. 8 kHz の 7 値、無指向 = 全部 1) と正規化した向き
+	 * (無指向は [0, 0, 0])。 */
 	{
-		int n2;
-		for (n2 = 0; n2 < g->nsrc; n2++)
+		int n2, b;
+		for (n2 = 0; n2 < g->nsrc; n2++) {
+			const double *a = g->srcdir ? g->srcdir + (size_t)n2 * GA_NBAND : NULL;
+			int directional = 0;
+			if (a)
+				for (b = 0; b < GA_NBAND; b++)
+					if (a[b] < 1.0) directional = 1;
 			fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g], "
-			        "\"gain\": %.10g, \"delay_s\": %.10g }%s\n",
+			        "\"gain\": %.10g, \"delay_s\": %.10g, \"directivity\": [",
 			        g->feedpos[3 * n2 + 0], g->feedpos[3 * n2 + 1],
-			        g->feedpos[3 * n2 + 2], g->srcgain[n2], g->srcdelay[n2],
+			        g->feedpos[3 * n2 + 2], g->srcgain[n2], g->srcdelay[n2]);
+			for (b = 0; b < GA_NBAND; b++)
+				fprintf(fp, "%.10g%s", a ? a[b] : 1.0, (b + 1 < GA_NBAND) ? ", " : "");
+			fprintf(fp, "], \"aim\": [%.10g, %.10g, %.10g] }%s\n",
+			        directional ? g->srcaim[3 * n2 + 0] : 0.0,
+			        directional ? g->srcaim[3 * n2 + 1] : 0.0,
+			        directional ? g->srcaim[3 * n2 + 2] : 0.0,
 			        (n2 + 1 < g->nsrc) ? "," : "");
+		}
 	}
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"source\": {\n");

@@ -81,14 +81,21 @@ int ac_write_metadata(ac_t *ac)
 	 * gain / delay_s (Decision 7) はキー追加のみ (既定 1 / 0)。 */
 	fprintf(fp, "  \"multi_source\": %s,\n", ac->multi_source ? "true" : "false");
 	fprintf(fp, "  \"sources\": [\n");
-	for (r = 0; r < ac->nsrc; r++)
+	/* directivity_a / aim (ADR-0014) も追加キー : 実際に使った実効 a
+	 * (D = a + (1-a) cos、無指向 = 1) と正規化した向き (無指向は [0, 0, 0]) */
+	for (r = 0; r < ac->nsrc; r++) {
+		const double a = ac->srca ? ac->srca[r] : 1.0;
+		const double *u = (ac->srca && a < 1.0) ? ac->srcaim + 3 * r : NULL;
 		fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g], "
-		        "\"gain\": %.10g, \"delay_s\": %.10g }%s\n",
+		        "\"gain\": %.10g, \"delay_s\": %.10g, \"directivity_a\": %.10g, "
+		        "\"aim\": [%.10g, %.10g, %.10g] }%s\n",
 		        ac->x0 + (ac->srccell[3 * r + 0] + 0.5) * ac->dx,
 		        ac->y0 + (ac->srccell[3 * r + 1] + 0.5) * ac->dx,
 		        ac->z0 + (ac->srccell[3 * r + 2] + 0.5) * ac->dx,
-		        ac->srcgain[r], ac->srcdelay[r],
+		        ac->srcgain[r], ac->srcdelay[r], a,
+		        u ? u[0] : 0.0, u ? u[1] : 0.0, u ? u[2] : 0.0,
 		        (r + 1 < ac->nsrc) ? "," : "");
+	}
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"receivers\": [\n");
 	for (r = 0; r < ac->nrecv; r++) {

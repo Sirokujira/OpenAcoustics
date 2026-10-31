@@ -137,6 +137,8 @@ typedef struct {
 	double  recv[3];
 	double  src[3];
 	double  sgain;     /* 音源のゲイン (振幅に掛かる — ADR-0010 Decision 7) */
+	const double *sdir; /* 音源の指向性 a_b (GA_NBAND) / NULL = 無指向 (ADR-0014) */
+	const double *saim; /* 正規化した向き (sdir があるときだけ) */
 	double  sdelay;    /* 音源の発火時刻 [s] (到達は sdelay + r/c) */
 	long    nodes;
 	int     truncated;
@@ -255,6 +257,20 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 		}
 		amp[b] = v;
 	}
+	/* 音源の指向性 (ADR-0014) : 放射方向 = 音源から最初の反射点 (直接音なら
+	 * 受音点) へ向かう方向。D_b = a_b + (1-a_b) cos を振幅に掛ける (負なら
+	 * 背面ローブの極性反転 — 物理どおり)。無指向 (sdir = NULL) は何もしない。 */
+	if (c->sdir) {
+		double e[3], el, ce;
+		e[0] = pts[depth][0] - c->src[0];
+		e[1] = pts[depth][1] - c->src[1];
+		e[2] = pts[depth][2] - c->src[2];
+		el = sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+		ce = (el > 0.0) ? (e[0] * c->saim[0] + e[1] * c->saim[1]
+		                   + e[2] * c->saim[2]) / el : 1.0;
+		for (b = 0; b < GA_NBAND; b++)
+			amp[b] *= c->sdir[b] + (1.0 - c->sdir[b]) * ce;
+	}
 	/* 全バンドで消えている像は置かない (alpha = 1 の壁など) */
 	for (b = 0; b < GA_NBAND; b++)
 		if (fabs(amp[b]) > 1e-300) break;
@@ -300,6 +316,12 @@ int ga_images(ga_t *g, int ri, int si, double *band)
 	c.src[2] = g->feedpos[3 * si + 2];
 	c.sgain  = g->srcgain[si];
 	c.sdelay = g->srcdelay[si];
+	if (g->srcdir) {
+		const double *a = g->srcdir + (size_t)si * GA_NBAND;
+		int b, directional = 0;
+		for (b = 0; b < GA_NBAND; b++) if (a[b] < 1.0) directional = 1;
+		if (directional) { c.sdir = a; c.saim = g->srcaim + 3 * si; }
+	}
 	chain[0][0] = c.src[0]; chain[0][1] = c.src[1]; chain[0][2] = c.src[2];
 
 	/* nimage/nblocked は加算のみ (リセットとまとめログは ga_synth —
@@ -448,9 +470,17 @@ int ga_rays(ga_t *g)
 	const double sgain2 = g->srcgain[sidx] * g->srcgain[sidx];
 	const double smax   = GA_C0 * (g->duration - sdelay);
 	const double einit  = sgain2 / (double)g->nrays;
+	/* 音源の指向性 (ADR-0014) — 無指向の音源は NULL (従来とビット等価) */
+	const double *sdir = NULL, *saim = NULL;
 	/* 音源ごとに決定的ハッシュ列を先頭から使う : 単一音源の既定動作と
 	 * 一致し、multi_source の各音源も単独実行と同じ列になる */
 	g->qidx = 0;
+	if (g->srcdir) {
+		const double *a = g->srcdir + (size_t)sidx * GA_NBAND;
+		int b2, directional = 0;
+		for (b2 = 0; b2 < GA_NBAND; b2++) if (a[b2] < 1.0) directional = 1;
+		if (directional) { sdir = a; saim = g->srcaim + 3 * sidx; }
+	}
 	if (smax <= 0.0 || einit <= 0.0) continue;   /* 窓外 / gain = 0 は寄与なし */
 	for (i = 0; i < g->nrays; i++) {
 		double p[3], d[3], w[GA_NBAND];
@@ -467,6 +497,13 @@ int ga_rays(ga_t *g)
 		p[1] = g->feedpos[3 * sidx + 1];
 		p[2] = g->feedpos[3 * sidx + 2];
 		for (b = 0; b < GA_NBAND; b++) w[b] = einit;
+		if (sdir) {   /* 指向性 (ADR-0014) : 発射方向の D_b^2 をエネルギーに */
+			const double ce = d[0] * saim[0] + d[1] * saim[1] + d[2] * saim[2];
+			for (b = 0; b < GA_NBAND; b++) {
+				const double D = sdir[b] + (1.0 - sdir[b]) * ce;
+				w[b] = einit * D * D;
+			}
+		}
 
 		for (bounce = 0; bounce < GA_MAXBOUNCE; bounce++) {
 			int wsidx, waxis, osidx, oaxis, sidx, hitaxis;

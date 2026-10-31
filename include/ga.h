@@ -65,6 +65,12 @@
 #define GA_GAIN_MAX   1000.0   /* |gain| の上限 (負は極性反転) */
 #define GA_DELAY_MAX  1.0      /* delay_s の上限 [s] (下限は 0) */
 
+/* 1 次指向性の名前 -> a (D = a + (1-a) cos)。FDTD 側 (acoustic.h) と同じ値 */
+#define GA_DIR_SUBCARDIOID   0.7
+#define GA_DIR_CARDIOID      0.5
+#define GA_DIR_SUPERCARDIOID 0.36602540378443865   /* (sqrt(3)-1)/2 : 前後比最大 */
+#define GA_DIR_HYPERCARDIOID 0.25                  /* 指向係数最大 */
+
 #define GA_PATH_MAX  4096
 #define GA_NAME_MAX  64
 #define GA_PI        3.14159265358979323846
@@ -184,6 +190,14 @@ typedef struct {
 	 * NULL のままなら全既定値 (setup が既定値で確保する)。 */
 	double *srcgain;                     /* nfeed 要素 (既定 1) */
 	double *srcdelay;                    /* nfeed 要素 [s] (既定 0) */
+	/* 音源の指向性 (.ofdx acoustic.feeds[].directivity / aim — OpenFDTD-X
+	 * ADR-0014)。1 次の指向性 D_b(theta) = a_b + (1-a_b) cos(theta) (theta は
+	 * aim からの放射方向の角度)、正面で D = 1 (無指向と同じ振幅) に規格化。
+	 * 直接音・鏡像は放射方向の D_b を振幅に、レイは発射方向の D_b^2 を
+	 * エネルギーに掛ける。NULL = 全 feed 無指向 (従来動作)。FDTD 側と同じ
+	 * キー・同じ意味 (FDTD は有効帯域内のバンド平均の a を使う)。 */
+	double *srcdir;                      /* nfeed * GA_NBAND : バンド別の a (既定 1) */
+	double *srcaim;                      /* nfeed * 3 : 向き (setup で正規化。0 = 未指定) */
 	double  delay_max;                   /* 発火する音源集合の max(delay) */
 	double scatter[GA_NBAND];            /* 拡散反射の割合の室既定 (バンド別) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
