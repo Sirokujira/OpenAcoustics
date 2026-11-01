@@ -244,6 +244,12 @@ mkdir -p /tmp/ga-hall && cp data/sample/hall.ofd data/sample/hall.ofdx /tmp/ga-h
 6. MSVC フラグは CMakeLists の既存ブロックに従う (`/utf-8`,
    `_USE_MATH_DEFINES`, `_CRT_SECURE_NO_WARNINGS`)。円周率は `AC_PI`。
 7. 外部ライブラリを追加しない。OpenMP のみ任意で `#ifdef _OPENMP` ガード。
+7b. **浮動小数点の縮約 (FMA) を禁止**: CMakeLists が GCC/Clang に
+   `-ffp-contract=off` を付ける (MSVC は /fp:precise 既定で縮約しない)。
+   GCC の既定は文をまたいで a*b+c を FMA に縮約するので、FMA を持つ
+   命令セット向けのビルドでは同じ式でもループごとに丸めが変わり、外壁と
+   障害物面のビット一致 (o) が落ちる (Ubuntu 26.04 / GCC 15 の CI で実際に
+   踏んだ)。外さないこと。`-ffast-math` 系も同じ理由で使わない。
 8. ディレクトリ走査は POSIX `opendir` / Windows `FindFirstFileA` の 2 経路
    (input_ofd.c)。パス結合は `/` で良い (Windows も受け付ける)。
 
