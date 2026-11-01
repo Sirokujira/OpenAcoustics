@@ -297,6 +297,69 @@ static int parse_receivers(ac_t *ac, js_t *j)
  * キー名の注意 : acoustic.sources は**使えない**。GUI (OpenFDTD-X) が
  * そのキーを音源一覧 (AcousticSourceTab の配置表) として既に書いており、
  * 意味も並びも別物だから。詳細は ga_ofdx.c の同じ関数のコメント参照。 */
+/* acoustic.feeds[].directivity の値 -> バンド別の a[6] (D = a + (1-a) cos)。
+ * 名前 (omni / subcardioid / cardioid / supercardioid / hypercardioid /
+ * figure8)、数値 a (0..1)、またはバンド別の配列 (125 Hz .. 4 kHz、足りない
+ * バンドは最後の値で外挿)。範囲外・未知の名前は既定値に落とさず非零終了
+ * (数値を捏造しない)。幾何音響側 (ga_ofdx.c) と同じ規則。 */
+static int parse_directivity(ac_t *ac, js_t *j, int idx, double a[AC_NBAND_OFDX])
+{
+	int b, n = 0;
+	double v;
+	if (jpeek(j) == '"') {
+		char name[32];
+		if (jstring(j, name, sizeof(name))) return 1;
+		if (!strcmp(name, "omni")) v = 1.0;
+		else if (!strcmp(name, "subcardioid")) v = AC_DIR_SUBCARDIOID;
+		else if (!strcmp(name, "cardioid")) v = AC_DIR_CARDIOID;
+		else if (!strcmp(name, "supercardioid")) v = AC_DIR_SUPERCARDIOID;
+		else if (!strcmp(name, "hypercardioid")) v = AC_DIR_HYPERCARDIOID;
+		else if (!strcmp(name, "figure8")) v = 0.0;
+		else {
+			ac_err(ac, ".ofdx acoustic.feeds[%d].directivity = \"%s\" is not a "
+			       "known pattern (omni, subcardioid, cardioid, supercardioid, "
+			       "hypercardioid, figure8 — or a number 0..1 = a in "
+			       "D = a + (1-a) cos)", idx + 1, name);
+			return 1;
+		}
+		for (b = 0; b < AC_NBAND_OFDX; b++) a[b] = v;
+		return 0;
+	}
+	if (jpeek(j) == '[') {
+		j->s++;
+		if (jpeek(j) == ']') {
+			ac_err(ac, ".ofdx acoustic.feeds[%d].directivity is an empty array",
+			       idx + 1);
+			return 1;
+		}
+		for (;;) {
+			if (jnumber(j, &v)) return 1;
+			if (!(v >= 0.0 && v <= 1.0)) {
+				ac_err(ac, ".ofdx acoustic.feeds[%d].directivity[%d] = %g is out "
+				       "of range (0 .. 1 = a in D = a + (1-a) cos)", idx + 1,
+				       n + 1, v);
+				return 1;
+			}
+			if (n < AC_NBAND_OFDX) a[n] = v;
+			n++;
+			if (jpeek(j) == ',') { j->s++; continue; }
+			break;
+		}
+		if (jexpect(j, ']')) return 1;
+		for (b = (n < AC_NBAND_OFDX ? n : AC_NBAND_OFDX); b < AC_NBAND_OFDX; b++)
+			a[b] = a[(n < AC_NBAND_OFDX ? n : AC_NBAND_OFDX) - 1];
+		return 0;
+	}
+	if (jnumber(j, &v)) return 1;
+	if (!(v >= 0.0 && v <= 1.0)) {
+		ac_err(ac, ".ofdx acoustic.feeds[%d].directivity = %g is out of range "
+		       "(0 .. 1 = a in D = a + (1-a) cos)", idx + 1, v);
+		return 1;
+	}
+	for (b = 0; b < AC_NBAND_OFDX; b++) a[b] = v;
+	return 0;
+}
+
 static int parse_feeds(ac_t *ac, js_t *j)
 {
 	int idx = 0, warned = 0, b;
@@ -316,6 +379,9 @@ static int parse_feeds(ac_t *ac, js_t *j)
 	for (;;) {
 		char key[64];
 		double gain = 1.0, delay = 0.0, v;
+		double dir[AC_NBAND_OFDX], aim[3] = { 0.0, 0.0, 0.0 };
+		int has_dir = 0, has_aim = 0;
+		for (b = 0; b < AC_NBAND_OFDX; b++) dir[b] = 1.0;
 		if (jexpect(j, '{')) return 1;
 		if (jpeek(j) == '}') { j->s++; }
 		else {
@@ -343,6 +409,28 @@ static int parse_feeds(ac_t *ac, js_t *j)
 					}
 					delay = v;
 				}
+				else if (!strcmp(key, "directivity")) {
+					if (parse_directivity(ac, j, idx, dir)) return 1;
+					has_dir = 1;
+				}
+				else if (!strcmp(key, "aim")) {
+					int c = 0;
+					if (jexpect(j, '[')) return 1;
+					for (;;) {
+						if (jnumber(j, &v)) return 1;
+						if (c < 3) aim[c] = v;
+						c++;
+						if (jpeek(j) == ',') { j->s++; continue; }
+						break;
+					}
+					if (jexpect(j, ']')) return 1;
+					if (c != 3) {
+						ac_err(ac, ".ofdx acoustic.feeds[%d].aim must be a "
+						       "3-vector [x, y, z] (got %d values)", idx + 1, c);
+						return 1;
+					}
+					has_aim = 1;
+				}
 				else {
 					if (jskip(j)) return 1;   /* 未知キー (前方互換) */
 				}
@@ -356,6 +444,28 @@ static int parse_feeds(ac_t *ac, js_t *j)
 			ac->srcdelay[idx] = delay;
 			ac_log(ac, ".ofdx: feed #%d -> gain = %.4g, delay = %.4g s",
 			       idx + 1, gain, delay);
+			if (has_dir || has_aim) {
+				if (!ac->srcdir_bands) {
+					size_t nf = (size_t)ac->nfeed;
+					ac->srcdir_bands = (double *)malloc(nf * AC_NBAND_OFDX
+					                                    * sizeof(double));
+					ac->srcaim = (double *)calloc(nf * 3, sizeof(double));
+					if (!ac->srcdir_bands || !ac->srcaim) {
+						ac_err(ac, "out of memory (acoustic.feeds directivity)");
+						return 1;
+					}
+					for (b = 0; b < ac->nfeed * AC_NBAND_OFDX; b++)
+						ac->srcdir_bands[b] = 1.0;
+				}
+				for (b = 0; b < AC_NBAND_OFDX; b++)
+					ac->srcdir_bands[(size_t)idx * AC_NBAND_OFDX + b] = dir[b];
+				for (b = 0; b < 3; b++) ac->srcaim[3 * idx + b] = aim[b];
+				ac_log(ac, ".ofdx: feed #%d -> directivity a = [%.4g %.4g %.4g "
+				       "%.4g %.4g %.4g] (D = a + (1-a) cos, 125 Hz .. 4 kHz), "
+				       "aim = %s(%.4g, %.4g, %.4g)", idx + 1, dir[0], dir[1],
+				       dir[2], dir[3], dir[4], dir[5], has_aim ? "" : "unset ",
+				       aim[0], aim[1], aim[2]);
+			}
 		}
 		else if (!warned) {
 			ac_log(ac, "warning: .ofdx acoustic.feeds has more entries than "
@@ -368,8 +478,105 @@ static int parse_feeds(ac_t *ac, js_t *j)
 	}
 }
 
+/* ── acoustic.obstacles : 障害物 (geometry) ごとの材質 ───────────────
+ * [ { "geometry": 1 起点の番号, "alpha": [6 値], "enabled", "name",
+ *     "scattering" (幾何音響専用 — ここでは読み飛ばす) }, ... ]
+ * acoustic 直下に置くのは幾何音響と**共有する**キーだから (両ソルバーが
+ * 同じ障害物を同じ材質で見る)。幾何音響専用の acoustic.ga.obstacles[] は
+ * 読まない (acoustic.ga は丸ごと読み飛ばす規約 — そちらだけを書いた既存の
+ * 入力で FDTD の結果が変わらないように)。alpha 省略は剛体のまま、足りない
+ * バンドは最後の値で外挿 (外壁と同じ規則)。存在しない番号は非零終了、
+ * 同じ番号の行が複数あれば最初の行を使う (幾何音響側と同じ規則)。 */
+static int parse_obstacle_row(ac_t *ac, js_t *j)
+{
+	char key[64];
+	double a[AC_NBAND_OFDX], v;
+	int acount = 0, idx = 0, enabled = 1, b;
+
+	for (b = 0; b < AC_NBAND_OFDX; b++) a[b] = 0.0;
+	if (jexpect(j, '{')) return 1;
+	if (jpeek(j) == '}') { j->s++; return 0; }
+	for (;;) {
+		if (jstring(j, key, sizeof(key))) return 1;
+		if (jexpect(j, ':')) return 1;
+		if (!strcmp(key, "enabled")) {
+			if (jbool(j, &enabled)) return 1;
+		}
+		else if (!strcmp(key, "geometry")) {
+			if (jnumber(j, &v)) return 1;
+			idx = (int)v;
+		}
+		else if (!strcmp(key, "alpha")) {
+			if (jexpect(j, '[')) return 1;
+			if (jpeek(j) == ']') { j->s++; }
+			else {
+				for (;;) {
+					if (jnumber(j, &v)) return 1;
+					if (v < 0.0) v = 0.0;
+					if (v > 1.0) v = 1.0;
+					if (acount < AC_NBAND_OFDX) a[acount] = v;
+					acount++;
+					if (jpeek(j) == ',') { j->s++; continue; }
+					break;
+				}
+				if (jexpect(j, ']')) return 1;
+			}
+		}
+		else {
+			if (jskip(j)) return 1;   /* name / scattering / 未知キー */
+		}
+		if (jpeek(j) == ',') { j->s++; continue; }
+		if (jexpect(j, '}')) return 1;
+		break;
+	}
+	if (!enabled) return 0;
+	if (idx < 1 || idx > ac->ngeom) {
+		ac_err(ac, ".ofdx acoustic.obstacles: geometry = %d does not match "
+		       "any geometry line in the .ofd (it has %d — the index is "
+		       "1-based, same as \"geometry #N\" in solver.log)", idx, ac->ngeom);
+		return 1;
+	}
+	if (!ac->obs_has) {
+		ac->obs_has = (unsigned char *)calloc((size_t)ac->ngeom, 1);
+		ac->obs_bands = (double *)calloc((size_t)ac->ngeom * AC_NBAND_OFDX,
+		                                 sizeof(double));
+		if (!ac->obs_has || !ac->obs_bands) {
+			ac_err(ac, "out of memory (acoustic.obstacles, %d geometries)",
+			       ac->ngeom);
+			return 1;
+		}
+	}
+	if (ac->obs_has[idx - 1]) {
+		ac_log(ac, "warning: .ofdx acoustic.obstacles has multiple rows for "
+		       "geometry #%d — using the first", idx);
+		return 0;
+	}
+	ac->obs_has[idx - 1] = 1;
+	for (b = 0; b < AC_NBAND_OFDX; b++)
+		ac->obs_bands[(size_t)(idx - 1) * AC_NBAND_OFDX + b] =
+			(acount <= 0) ? 0.0 : (b < acount) ? a[b] : a[acount - 1];
+	{
+		const double *o = ac->obs_bands + (size_t)(idx - 1) * AC_NBAND_OFDX;
+		ac_log(ac, ".ofdx: obstacle #%d material -> alpha = "
+		       "[%.4g %.4g %.4g %.4g %.4g %.4g] (125 Hz .. 4 kHz, "
+		       "acoustic.obstacles)", idx, o[0], o[1], o[2], o[3], o[4], o[5]);
+	}
+	return 0;
+}
+
+static int parse_obstacles(ac_t *ac, js_t *j)
+{
+	if (jexpect(j, '[')) return 1;
+	if (jpeek(j) == ']') { j->s++; return 0; }
+	for (;;) {
+		if (parse_obstacle_row(ac, j)) return 1;
+		if (jpeek(j) == ',') { j->s++; continue; }
+		return jexpect(j, ']');
+	}
+}
+
 /* root.acoustic の中身 (読むのは absorption / receivers / multi_source /
- * feeds / angle_dependent_absorption のみ、他は読み飛ばす) */
+ * feeds / angle_dependent_absorption / obstacles のみ、他は読み飛ばす) */
 static int walk_acoustic(ac_t *ac, js_t *j)
 {
 	char key[64];
@@ -391,6 +598,10 @@ static int walk_acoustic(ac_t *ac, js_t *j)
 		}
 		else if (!strcmp(key, "receivers")) {
 			if (parse_receivers(ac, j)) return 1;
+		}
+		else if (!strcmp(key, "obstacles")) {
+			/* 障害物の材質 — 幾何音響と共有するキー (parse_obstacles 参照) */
+			if (parse_obstacles(ac, j)) return 1;
 		}
 		else if (!strcmp(key, "angle_dependent_absorption")) {
 			/* 角度依存吸音 (局所反応境界) : 既定 false = 従来どおり
@@ -482,9 +693,11 @@ int ac_read_ofdx(ac_t *ac)
 	rc = walk_object(ac, &j, "acoustic", 0);
 	free(buf);
 	if (rc != 0) {
-		/* 壊れた JSON で黙って既定値を使うのは「静かに狂う」ので明確に失敗させる */
-		ac_err(ac, "malformed JSON in .ofdx '%s' (fix or remove the sidecar)",
-		       ac->ofdx_path);
+		/* 壊れた JSON・値域外の値で黙って既定値を使うのは「静かに狂う」ので
+		 * 明確に失敗させる (値域外なら具体的な理由はこの直前に出ている —
+		 * 文言は幾何音響側 ga_ofdx.c と揃える) */
+		ac_err(ac, "malformed JSON or bad value in .ofdx '%s' (fix or remove "
+		       "the sidecar)", ac->ofdx_path);
 		return 1;
 	}
 	/* 実効値 (どのバンドを使うか) は fmax が決まる ac_setup で決めてログする */

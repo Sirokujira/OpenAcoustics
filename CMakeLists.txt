@@ -22,6 +22,18 @@ else()
     set(MATH_LIB m)
 endif()
 
+# ── 浮動小数点の縮約 (FMA) を禁止する ─────────────────────────────
+# GCC は既定 (-std=gnu11) で文をまたいで a*b + c を FMA 1 命令に縮約する
+# (-ffp-contract=fast)。FMA を持つ命令セット向けのビルドでは、数学的に同じ
+# 式でもループごとに縮約の有無が変わり、最後の 1 bit が変わる。外壁と
+# 障害物面のビット一致 (判定 o — 不変条件 9) と「同じ入力・同じバイナリなら
+# 同じ結果」の主張はこれに依存するので縮約させない (Ubuntu 26.04 / GCC 15
+# の CI ランナーで (o) が落ちたのを、手元の -march=x86-64-v3 ビルドで再現し
+# この指定で一致することを確認した)。MSVC は /fp:precise (既定) で縮約しない。
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-ffp-contract=off)
+endif()
+
 # OpenMP は任意 (無ければシリアルでビルド : macOS の AppleClang 等)。
 # 並列はリダクションを持たないセル/面ループのみで、スレッド数によらず
 # 結果はビット単位で一致する (acoustic_check.sh が判定する)。
@@ -64,6 +76,7 @@ add_executable(ofdx_acoustic_ga
     src/ga_ofdx.c
     src/ga_setup.c
     src/ga_trace.c
+    src/ga_shape.c
     src/ga_synth.c
     src/ga_json.c
     src/wav.c

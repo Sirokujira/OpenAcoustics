@@ -65,6 +65,12 @@
 #define GA_GAIN_MAX   1000.0   /* |gain| の上限 (負は極性反転) */
 #define GA_DELAY_MAX  1.0      /* delay_s の上限 [s] (下限は 0) */
 
+/* 1 次指向性の名前 -> a (D = a + (1-a) cos)。FDTD 側 (acoustic.h) と同じ値 */
+#define GA_DIR_SUBCARDIOID   0.7
+#define GA_DIR_CARDIOID      0.5
+#define GA_DIR_SUPERCARDIOID 0.36602540378443865   /* (sqrt(3)-1)/2 : 前後比最大 */
+#define GA_DIR_HYPERCARDIOID 0.25                  /* 指向係数最大 */
+
 #define GA_PATH_MAX  4096
 #define GA_NAME_MAX  64
 #define GA_PI        3.14159265358979323846
@@ -78,31 +84,70 @@ enum { GA_XM = 0, GA_XP, GA_YM, GA_YP, GA_ZM, GA_ZP, GA_NWALL };
 /* ── 入力要素 ──────────────────────────────────────────────────── */
 
 /* 室内の障害物 (既定は剛体 alpha = 0)。遮蔽・鏡像法の反射面・光線追跡の
- * 反射に使う。shape 1 (直方体) は lo/hi が厳密に形状と一致し、他の shape は
- * AABB 近似。材質は .ofdx の acoustic.ga.obstacles[] で与えられる
- * (FDTD 側は geometry を常に剛体としてボクセル化するので、材質を与えると
- * 両ソルバーの障害物の扱いは異なる — 高域にのみ効く材質指定)。 */
+ * 反射に使う。本家 OpenFDTD の全 shape を**形状どおり**に扱う (ga_shape.c —
+ * 内外判定は FDTD 側 fdtd.c の geom_inside と同じ規則):
+ *   GA_SOLID_BOX    shape 1         軸平行の 6 面 (従来どおりの経路)
+ *   GA_SOLID_POLY   shape 31〜33 (三角柱) / 41〜43 (角錐台)
+ *                   平面の凸多面体。面 (5 / 6 枚) は一般の平面多角形として
+ *                   鏡像法の面集合に入る
+ *   GA_SOLID_CURVED shape 2 (楕円体) / 11〜13 (楕円柱) / 51〜53 (円錐台)
+ *                   曲面は鏡面像を作れないので鏡像法の面集合に入らず、
+ *                   反射は光線追跡が受け持つ (曲面に当たった経路はレイ側で
+ *                   検出する — 二重計上の回避と取りこぼしの防止)
+ * lo/hi は外接箱 (交差判定の前段の絞り込みと受音点の距離の下限に使う)。
+ * 材質は .ofdx の acoustic.obstacles[] / acoustic.ga.obstacles[]。 */
+#define GA_SOLID_BOX    1
+#define GA_SOLID_POLY   2
+#define GA_SOLID_CURVED 3
+#define GA_POLY_FMAX    6       /* 多面体の面の最大数 (角錐台 = 6) */
 typedef struct {
 	int    shape;
 	double g[8];
 	double lo[3], hi[3];
-	int    ok;          /* 0 = 未知 shape (無視した) */
-	int    exact;       /* 1 = shape 1 (厳密)、0 = AABB 近似 */
-	int    surf0;       /* この障害物の 6 面の先頭 surf[] 添字 (無効なら -1) */
-	int    has_mat;     /* 1 = .ofdx acoustic.ga.obstacles で材質指定あり */
+	int    ok;          /* 0 = 未知 shape / 体積 0 (無視した) */
+	int    kind;        /* GA_SOLID_BOX / GA_SOLID_POLY / GA_SOLID_CURVED */
+	int    surf0;       /* この障害物の面の先頭 surf[] 添字 (無効なら -1)。
+	                     * 箱は 2*axis + side の 6 面、多面体は面 f が surf0 + f、
+	                     * 曲面は材質だけを持つ 1 面 (axis = GA_SURF_CURVED) */
+	/* 多面体の面 (GA_SOLID_POLY のみ) : 外向き単位法線 fn と平面 fn.x = fd。
+	 * 頂点 fv は fn のまわりに反時計回り。fnv = 0 は面積 0 の面 (角錐台の
+	 * 尖った端など — 半空間としては使うが鏡像法には入れない)。 */
+	int    nface;
+	double fn[GA_POLY_FMAX][3];
+	double fd[GA_POLY_FMAX];
+	int    fnv[GA_POLY_FMAX];
+	double fv[GA_POLY_FMAX][4][3];
+	int    has_mat;     /* 1 = .ofdx で材質指定あり (下の mat_src のどちらか) */
+	/* 材質の出所 : 0 = なし、1 = acoustic.obstacles (FDTD と共有するキー)、
+	 * 2 = acoustic.ga.obstacles (幾何音響専用 — 1 より優先。既存入力の
+	 * 後方互換のため。JSON の並び順に依らない)。 */
+	int    mat_src;
 	double mat_alpha[GA_NBAND];  /* バンド別吸音率 (既定 0 = 剛体) */
 	double mat_scatter[GA_NBAND]; /* 散乱係数 (バンド別。[0] < 0 = 室の既定) */
 } ga_geom_t;
 
-/* 反射面 : 軸平行の有限矩形。室の 6 面と、障害物 (AABB) 1 個あたり 6 面。
- * 鏡像法 (一般化された面集合による鏡像) と光線追跡が共通で使う。
- * 面が軸平行に限られるので、鏡映は 1 座標の反転、面内判定は残り 2 座標の
- * 範囲判定、入射角は cos(theta) = |d[axis]| で済む。 */
+/* 反射面。鏡像法 (一般化された面集合による鏡像) と光線追跡が共通で使う。
+ *   axis >= 0 : 軸平行の有限矩形 (室の 6 面と箱の障害物の 6 面)。鏡映は
+ *               1 座標の反転、面内判定は残り 2 座標の範囲判定、入射角は
+ *               cos(theta) = |d[axis]| で済む (従来どおりの経路 — 箱だけの
+ *               入力の結果はビット単位で不変)。
+ *   axis = GA_SURF_PLANE  : 一般の平面凸多角形 (多面体の面)。法線 n・平面
+ *               n.x = dpl・頂点 v[nv] で表し、鏡映・面内判定・入射角は
+ *               ベクトル演算で行う。
+ *   axis = GA_SURF_CURVED : 曲面の障害物の材質だけを持つ面 (鏡像法には
+ *               入らない。法線は光線追跡が当たった点ごとに求める)。 */
+#define GA_SURF_PLANE  (-1)
+#define GA_SURF_CURVED (-2)
 typedef struct {
-	int    axis;             /* 法線の軸 : 0=x, 1=y, 2=z */
-	double coord;            /* 平面の位置 */
-	double nrm;              /* 音場側 (反射する側) を向く法線の符号 +1/-1 */
+	int    axis;             /* 法線の軸 : 0=x, 1=y, 2=z / GA_SURF_PLANE / _CURVED */
+	double coord;            /* 平面の位置 (axis >= 0) */
+	double nrm;              /* 音場側 (反射する側) を向く法線の符号 +1/-1 (axis >= 0) */
 	double lo[2], hi[2];     /* 面内の矩形 (u = (axis+1)%3, v = (axis+2)%3) */
+	double n[3];             /* 音場側を向く単位法線 (GA_SURF_PLANE) */
+	double dpl;              /* 平面 n.x = dpl (GA_SURF_PLANE) */
+	int    nv;               /* 多角形の頂点数 (GA_SURF_PLANE) */
+	double v[4][3];          /* 頂点 (n のまわりに反時計回り) */
+	int    img;              /* 1 = 鏡像法の面集合に入る */
 	double alpha[GA_NBAND];
 	double refl[GA_NBAND];   /* 垂直入射の圧力反射係数 sqrt(1-alpha) */
 	double zeta[GA_NBAND];   /* 規格化インピーダンス (角度依存吸音のとき使う) */
@@ -180,6 +225,14 @@ typedef struct {
 	 * NULL のままなら全既定値 (setup が既定値で確保する)。 */
 	double *srcgain;                     /* nfeed 要素 (既定 1) */
 	double *srcdelay;                    /* nfeed 要素 [s] (既定 0) */
+	/* 音源の指向性 (.ofdx acoustic.feeds[].directivity / aim — OpenFDTD-X
+	 * ADR-0014)。1 次の指向性 D_b(theta) = a_b + (1-a_b) cos(theta) (theta は
+	 * aim からの放射方向の角度)、正面で D = 1 (無指向と同じ振幅) に規格化。
+	 * 直接音・鏡像は放射方向の D_b を振幅に、レイは発射方向の D_b^2 を
+	 * エネルギーに掛ける。NULL = 全 feed 無指向 (従来動作)。FDTD 側と同じ
+	 * キー・同じ意味 (FDTD は有効帯域内のバンド平均の a を使う)。 */
+	double *srcdir;                      /* nfeed * GA_NBAND : バンド別の a (既定 1) */
+	double *srcaim;                      /* nfeed * 3 : 向き (setup で正規化。0 = 未指定) */
 	double  delay_max;                   /* 発火する音源集合の max(delay) */
 	double scatter[GA_NBAND];            /* 拡散反射の割合の室既定 (バンド別) */
 	int    angle_dep;                    /* 1 = 角度依存吸音 (局所反応) を使う */
@@ -267,6 +320,22 @@ double ga_zeta_from_alpha(double alpha_stat);   /* 逆問題 (zeta >= peak の�
  *               band[] へ置く。受音点統計 (nimage/nblocked) は加算するだけ
  *               なので、リセットとまとめログは呼び出し側 (ga_synth)。
  *   ga_rays   : 全音源 x 全受音点のエコーグラム echo[] を埋める (進捗はここ) */
+/* ── 障害物の厳密形状 (ga_shape.c) ──
+ *   ga_solid_prepare : shape から kind・外接箱・多面体の面を作る (0 = 未知 /
+ *                      体積 0)
+ *   ga_solid_inside  : 点が形状の内側 (境界を含む) か — FDTD 側の
+ *                      geom_inside と同じ規則
+ *   ga_solid_entry   : 直線 p + t d が t in (tmin, tmax) で形状に入る最初の t。
+ *                      入れば 1 を返し、外向き単位法線 nrm と面番号 face
+ *                      (多面体の面 0..nface-1 / 箱は 2*axis + side / 曲面は -1)
+ *   ga_solid_distance: 点から形状までの距離の推定 (受音球の半径の上限用) */
+int    ga_solid_prepare(ga_geom_t *o);
+int    ga_solid_inside(const ga_geom_t *o, double x, double y, double z);
+int    ga_solid_entry(const ga_geom_t *o, const double p[3], const double d[3],
+                      double tmin, double tmax, double *t, double nrm[3],
+                      int *face);
+double ga_solid_distance(const ga_geom_t *o, double x, double y, double z);
+
 int ga_images(ga_t *g, int r, int si, double *band);
 int ga_rays(ga_t *g);
 

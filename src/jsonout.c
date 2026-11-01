@@ -81,14 +81,21 @@ int ac_write_metadata(ac_t *ac)
 	 * gain / delay_s (Decision 7) はキー追加のみ (既定 1 / 0)。 */
 	fprintf(fp, "  \"multi_source\": %s,\n", ac->multi_source ? "true" : "false");
 	fprintf(fp, "  \"sources\": [\n");
-	for (r = 0; r < ac->nsrc; r++)
+	/* directivity_a / aim (ADR-0014) も追加キー : 実際に使った実効 a
+	 * (D = a + (1-a) cos、無指向 = 1) と正規化した向き (無指向は [0, 0, 0]) */
+	for (r = 0; r < ac->nsrc; r++) {
+		const double a = ac->srca ? ac->srca[r] : 1.0;
+		const double *u = (ac->srca && a < 1.0) ? ac->srcaim + 3 * r : NULL;
 		fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g], "
-		        "\"gain\": %.10g, \"delay_s\": %.10g }%s\n",
+		        "\"gain\": %.10g, \"delay_s\": %.10g, \"directivity_a\": %.10g, "
+		        "\"aim\": [%.10g, %.10g, %.10g] }%s\n",
 		        ac->x0 + (ac->srccell[3 * r + 0] + 0.5) * ac->dx,
 		        ac->y0 + (ac->srccell[3 * r + 1] + 0.5) * ac->dx,
 		        ac->z0 + (ac->srccell[3 * r + 2] + 0.5) * ac->dx,
-		        ac->srcgain[r], ac->srcdelay[r],
+		        ac->srcgain[r], ac->srcdelay[r], a,
+		        u ? u[0] : 0.0, u ? u[1] : 0.0, u ? u[2] : 0.0,
 		        (r + 1 < ac->nsrc) ? "," : "");
+	}
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"receivers\": [\n");
 	for (r = 0; r < ac->nrecv; r++) {
@@ -134,6 +141,30 @@ int ac_write_metadata(ac_t *ac)
 	        ac->wzeta[AC_YP], ac->wzeta[AC_ZM], ac->wzeta[AC_ZP]);
 	fprintf(fp, "  \"t_sabine_s\": %.10g,\n", ac->tsab);   /* -1 = A=0 (無限大) */
 	fprintf(fp, "  \"rigid_geometries\": %d,\n", ac->ngeom);
+	/* 形状ごとのボクセル化結果 (追加キーのみ)。1 形状 = 1 行で、extent_m は
+	 * .ofd の直方体と同じ並び [x1, x2, y1, y2, z1, z2] (セル面) — 実際に
+	 * 剛体になった領域を GUI/利用者が確かめられるように出す。 */
+	{
+		int n;
+		fprintf(fp, "  \"geometry_voxels\": [\n");
+		for (n = 0; n < ac->ngeom; n++) {
+			const ac_gvox_t *gv = &ac->gvox[n];
+			double dv = ac->dx * ac->dx * ac->dx;
+			/* boundary_* は表面の境界 (.ofdx acoustic.obstacles[]。指定なし =
+			 * 剛体 = alpha 0 / zeta 0 / 界面 0)。 */
+			fprintf(fp, "    { \"shape\": %d, \"cells\": %ld, \"volume_m3\": %.10g, "
+			        "\"centroid_m\": [%.10g, %.10g, %.10g], "
+			        "\"extent_m\": [%.10g, %.10g, %.10g, %.10g, %.10g, %.10g], "
+			        "\"boundary_alpha\": %.10g, \"boundary_zeta\": %.10g, "
+			        "\"impedance_faces\": %ld }%s\n",
+			        ac->geom[n].shape, gv->ncell, gv->ncell * dv,
+			        gv->cen[0], gv->cen[1], gv->cen[2],
+			        gv->lo[0], gv->hi[0], gv->lo[1], gv->hi[1], gv->lo[2], gv->hi[2],
+			        gv->alpha, gv->zeta, gv->nface,
+			        (n + 1 < ac->ngeom) ? "," : "");
+		}
+		fprintf(fp, "  ],\n");
+	}
 	fprintf(fp, "  \"ofdx_sidecar\": %s\n", ac->have_ofdx ? "true" : "false");
 	fprintf(fp, "}\n");
 	return (fclose(fp) == 0) ? 0 : 1;

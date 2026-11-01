@@ -1,13 +1,15 @@
 OpenFDTD 4 2
-title = GA smoke: occlusion by rigid obstacles, AABB approximation and multi-feed warnings
+title = GA smoke: occlusion by rigid obstacles, exact curved solid and multi-feed warning
 # --------------------------------------------------------------------------
 # ofdx_acoustic_ga (幾何音響) 用のスモークケース。可視性判定 (遮蔽) と、
-# 対応できない入力に warning を出す経路を通す。
+# 正直なログ (曲面の扱い・使わない feed の warning) を出す経路を通す。
 #
 # 部屋 12 x 8 x 4 m、音源 #1 (2, 4, 2)。
 #   geometry #1 : shape 1 (直方体) の衝立 x=[5.9,6.1], y=[3,5], z=[0,3]
 #                 -> 厳密な箱として遮蔽判定に使われる (warning なし)
-#   geometry #2 : shape 11 (x 軸円柱) -> AABB 近似の warning が出ること
+#   geometry #2 : shape 11 (x 軸円柱) -> 形状どおりの曲面として扱われ、
+#                 「曲面は鏡面像を作らず反射は光線追跡が受け持つ」と
+#                 solver.log に出ること (以前は外接箱近似の warning だった)
 #   feed #2     : 複数音源の warning が出ること (#1 のみ使用)
 #
 #   受音点 #1 (10, 4, 2) : 直接音の経路は x = 6 の面を (y, z) = (4, 2) で
@@ -18,9 +20,9 @@ title = GA smoke: occlusion by rigid obstacles, AABB approximation and multi-fee
 #   受音点 #2 (10, 1, 2) : 直接音の経路は x = 6 を y = 2.5 で横切り、
 #     衝立の外側なので遮られない。image_sources_blocked = 0。
 #
-# 幾何音響では障害物の 1 次・2 次反射は鏡像法に含まれない (遮蔽と、
-# 光線追跡の反射としてのみ扱う)。これは v1 の既知の制約で、
-# ReadMe / AGENTS.md に明記してある。
+# 障害物の平面の面 (箱・三角柱・角錐台) は鏡像法の面集合に入り、低次の
+# 鏡面反射も出る。曲面 (円柱など) は鏡面像を作れないので、その反射は
+# 光線追跡が受け持つ (ReadMe「幾何音響の制約」)。
 # --------------------------------------------------------------------------
 xmesh = 0.0 24 12.0
 ymesh = 0.0 16 8.0

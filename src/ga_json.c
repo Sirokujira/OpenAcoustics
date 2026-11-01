@@ -102,14 +102,29 @@ int ga_write_metadata(ga_t *g)
 	 * gain / delay_s (Decision 7) はキー追加のみ (既定 1 / 0)。 */
 	fprintf(fp, "  \"multi_source\": %s,\n", g->multi_source ? "true" : "false");
 	fprintf(fp, "  \"sources\": [\n");
+	/* directivity / aim (ADR-0014) も追加キー : バンド別の a (D = a + (1-a) cos、
+	 * 125 Hz .. 8 kHz の 7 値、無指向 = 全部 1) と正規化した向き
+	 * (無指向は [0, 0, 0])。 */
 	{
-		int n2;
-		for (n2 = 0; n2 < g->nsrc; n2++)
+		int n2, b;
+		for (n2 = 0; n2 < g->nsrc; n2++) {
+			const double *a = g->srcdir ? g->srcdir + (size_t)n2 * GA_NBAND : NULL;
+			int directional = 0;
+			if (a)
+				for (b = 0; b < GA_NBAND; b++)
+					if (a[b] < 1.0) directional = 1;
 			fprintf(fp, "    { \"pos_m\": [%.10g, %.10g, %.10g], "
-			        "\"gain\": %.10g, \"delay_s\": %.10g }%s\n",
+			        "\"gain\": %.10g, \"delay_s\": %.10g, \"directivity\": [",
 			        g->feedpos[3 * n2 + 0], g->feedpos[3 * n2 + 1],
-			        g->feedpos[3 * n2 + 2], g->srcgain[n2], g->srcdelay[n2],
+			        g->feedpos[3 * n2 + 2], g->srcgain[n2], g->srcdelay[n2]);
+			for (b = 0; b < GA_NBAND; b++)
+				fprintf(fp, "%.10g%s", a ? a[b] : 1.0, (b + 1 < GA_NBAND) ? ", " : "");
+			fprintf(fp, "], \"aim\": [%.10g, %.10g, %.10g] }%s\n",
+			        directional ? g->srcaim[3 * n2 + 0] : 0.0,
+			        directional ? g->srcaim[3 * n2 + 1] : 0.0,
+			        directional ? g->srcaim[3 * n2 + 2] : 0.0,
 			        (n2 + 1 < g->nsrc) ? "," : "");
+		}
 	}
 	fprintf(fp, "  ],\n");
 	fprintf(fp, "  \"source\": {\n");
@@ -181,6 +196,27 @@ int ga_write_metadata(ga_t *g)
 	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
 	        g->angle_dep ? "true" : "false");
 	fprintf(fp, "  \"reflecting_surfaces\": %d,\n", g->nsurf);
+	/* 障害物の形状モデル (追加キー) : 全 shape を形状どおりに扱う
+	 * (ga_shape.c)。box = 軸平行の 6 面、polyhedron = 平面の凸多面体
+	 * (image_faces 枚が鏡像法の面集合に入る)、curved = 曲面 (鏡像法に
+	 * 入らず、反射は光線追跡が受け持つ)。無視した形状は "ignored"。 */
+	fprintf(fp, "  \"geometry_models\": [");
+	{
+		int n, f, ni;
+		for (n = 0; n < g->ngeom; n++) {
+			const ga_geom_t *o = &g->geom[n];
+			const char *m = !o->ok ? "ignored"
+			              : (o->kind == GA_SOLID_BOX) ? "box"
+			              : (o->kind == GA_SOLID_POLY) ? "polyhedron" : "curved";
+			ni = 0;
+			if (o->ok && o->kind == GA_SOLID_BOX) ni = 6;
+			if (o->ok && o->kind == GA_SOLID_POLY)
+				for (f = 0; f < o->nface; f++) if (o->fnv[f] > 0) ni++;
+			fprintf(fp, "%s\n    { \"geometry\": %d, \"shape\": %d, \"model\": \"%s\", "
+			        "\"image_faces\": %d }", n ? "," : "", n + 1, o->shape, m, ni);
+		}
+		fprintf(fp, "%s],\n", g->ngeom ? "\n  " : "");
+	}
 	fprintf(fp, "  \"obstacle_materials\": [");
 	{
 		int first = 1, n;

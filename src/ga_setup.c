@@ -8,7 +8,9 @@
  *          .ofdx で角度依存吸音を on にすると、局所反応境界として
  *          R(theta) = (zeta cos - 1)/(zeta cos + 1) を使う。zeta は
  *          吸音表の**ランダム入射** alpha から Paris の式を逆に解いて決める。
- *   - 反射面 : 室の 6 面と障害物 (AABB) の各 6 面をまとめた surf[]。
+ *   - 反射面 : 室の 6 面と障害物の面をまとめた surf[]。障害物は形状どおり
+ *          (ga_shape.c) — 箱は軸平行の 6 面、三角柱・角錐台は平面多角形の面、
+ *          曲面 (楕円体・楕円柱・円錐台) は材質だけを持つ 1 面。
  *          鏡像法も光線追跡もこのリストだけを見る。
  *   - 空気吸収 : ISO 9613-1 の減衰係数 [dB/m] をバンド中心周波数で評価する。
  *   - 計算時間 : T = clamp(1.5 * max_b T_Eyring(b), 0.5, 3.0) [s]。
@@ -104,83 +106,19 @@ double ga_zeta_from_alpha(double alpha_stat)
 	return 0.5 * (lo + hi);
 }
 
-/* ── 幾何 : AABB (shape 1 は厳密に同じ箱)。戻り値 0 = 対応しない shape ──
- * 並びは本家 OpenFDTD sol/ingeometry.c と同じ (FDTD 側 fdtd.c と同一規則)。 */
-static int geom_aabb(const ga_geom_t *g, double lo[3], double hi[3])
-{
-	const double *p = g->g;
-	int i;
-	double a, b;
-	switch (g->shape) {
-		case 1: case 2: case 11: case 12: case 13:
-			for (i = 0; i < 3; i++) {
-				a = p[2*i]; b = p[2*i + 1];
-				lo[i] = (a < b) ? a : b;
-				hi[i] = (a < b) ? b : a;
-			}
-			return 1;
-		case 31: case 32: case 33: {
-			int ax = g->shape - 31;
-			int u = (ax + 1) % 3, w = (ax + 2) % 3;
-			lo[ax] = (p[0] < p[1]) ? p[0] : p[1];
-			hi[ax] = (p[0] < p[1]) ? p[1] : p[0];
-			lo[u] = hi[u] = p[2];
-			lo[w] = hi[w] = p[5];
-			for (i = 1; i < 3; i++) {
-				if (p[2+i] < lo[u]) lo[u] = p[2+i];
-				if (p[2+i] > hi[u]) hi[u] = p[2+i];
-				if (p[5+i] < lo[w]) lo[w] = p[5+i];
-				if (p[5+i] > hi[w]) hi[w] = p[5+i];
-			}
-			return 1;
-		}
-		case 41: case 42: case 43:
-		case 51: case 52: case 53: {
-			int ax = (g->shape % 10) - 1;
-			int u = (ax + 1) % 3, w = (ax + 2) % 3;
-			double hu = ((p[4] > p[6]) ? p[4] : p[6]) / 2;
-			double hw = ((p[5] > p[7]) ? p[5] : p[7]) / 2;
-			lo[ax] = (p[0] < p[1]) ? p[0] : p[1];
-			hi[ax] = (p[0] < p[1]) ? p[1] : p[0];
-			lo[u] = p[2] - hu; hi[u] = p[2] + hu;
-			lo[w] = p[3] - hw; hi[w] = p[3] + hw;
-			return 1;
-		}
-		default:
-			return 0;
-	}
-}
-
-/* 点を含む剛体形状の番号 (0 起点。無ければ -1) */
+/* 点を含む剛体形状の番号 (0 起点。無ければ -1)。内外は形状どおり
+ * (ga_shape.c — FDTD 側の geom_inside と同じ規則、境界を含む)。 */
 static int geom_containing(const ga_t *g, double x, double y, double z)
 {
 	int n;
 	for (n = 0; n < g->ngeom; n++) {
 		const ga_geom_t *o = &g->geom[n];
 		if (!o->ok) continue;
-		if (x >= o->lo[0] && x <= o->hi[0] && y >= o->lo[1] && y <= o->hi[1] &&
-		    z >= o->lo[2] && z <= o->hi[2])
-			return n;
+		if (ga_solid_inside(o, x, y, z)) return n;
 	}
 	return -1;
 }
 
-/* 点から AABB 表面までの距離 (内部なら 0) */
-static double geom_distance(const ga_geom_t *o, double x, double y, double z)
-{
-	double p[3], d = 0.0;
-	int i;
-	p[0] = x; p[1] = y; p[2] = z;
-	for (i = 0; i < 3; i++) {
-		double e = 0.0;
-		if (p[i] < o->lo[i]) e = o->lo[i] - p[i];
-		else if (p[i] > o->hi[i]) e = p[i] - o->hi[i];
-		d += e * e;
-	}
-	return sqrt(d);
-}
-
-/* 名前 → ファイル名に使える形 (FDTD 側 fdtd.c と同じ規則) */
 static void safe_name(const char *name, char *out, size_t cap)
 {
 	size_t i;
@@ -245,22 +183,41 @@ int ga_setup(ga_t *g)
 	stot = 2.0 * (ly * lz + lx * lz + lx * ly);
 	g->area = stot;
 
-	/* ── 剛体障害物 (AABB) ── */
+	/* ── 剛体障害物 (形状どおり — ga_shape.c) ──
+	 * 箱は従来どおりの軸平行 6 面、三角柱・角錐台は平面の凸多面体
+	 * (面は鏡像法の面集合に入る)、楕円体・楕円柱・円錐台は曲面 (鏡面像を
+	 * 作れないので反射は光線追跡が受け持つ)。遮蔽・レイの反射・音源/受音点の
+	 * 「剛体内」判定はどれも実形状で行う。 */
 	for (n = 0; n < g->ngeom; n++) {
 		ga_geom_t *o = &g->geom[n];
-		o->ok = geom_aabb(o, o->lo, o->hi);
-		o->exact = (o->shape == 1);
+		int known = (o->shape == 1 || o->shape == 2 ||
+		             (o->shape >= 11 && o->shape <= 13) ||
+		             (o->shape >= 31 && o->shape <= 33) ||
+		             (o->shape >= 41 && o->shape <= 43) ||
+		             (o->shape >= 51 && o->shape <= 53));
+		o->ok = ga_solid_prepare(o);
 		if (!o->ok) {
-			ga_log(g, "warning: geometry #%d has unknown shape %d — ignored",
-			       n + 1, o->shape);
+			if (known)
+				ga_log(g, "warning: geometry #%d shape %d has zero volume "
+				       "(or a negative width) — ignored", n + 1, o->shape);
+			else
+				ga_log(g, "warning: geometry #%d has unknown shape %d — ignored",
+				       n + 1, o->shape);
 			continue;
 		}
-		if (!o->exact)
-			ga_log(g, "warning: geometry #%d shape %d approximated by its AABB "
-			       "(only shape 1 = box is exact in v1) — occlusion and ray "
-			       "reflection use the box [%.4g %.4g] x [%.4g %.4g] x [%.4g %.4g]",
-			       n + 1, o->shape, o->lo[0], o->hi[0], o->lo[1], o->hi[1],
-			       o->lo[2], o->hi[2]);
+		if (o->kind == GA_SOLID_POLY) {
+			int f, nimg = 0;
+			for (f = 0; f < o->nface; f++) if (o->fnv[f] > 0) nimg++;
+			ga_log(g, "geometry #%d shape %d: exact planar polyhedron — %d "
+			       "faces (%d in the image-source set)", n + 1, o->shape,
+			       o->nface, nimg);
+		}
+		else if (o->kind == GA_SOLID_CURVED)
+			ga_log(g, "geometry #%d shape %d: exact curved solid — occlusion and "
+			       "ray reflections use the true surface; curved surfaces form "
+			       "no image sources, so their specular reflections are carried "
+			       "by the rays (statistical, not a deterministic early "
+			       "reflection)", n + 1, o->shape);
 	}
 	if (g->ngeom > 0)
 	{
@@ -305,6 +262,34 @@ int ga_setup(ga_t *g)
 	g->delay_max = 0.0;
 	for (si2 = 0; si2 < g->nsrc; si2++)
 		if (g->srcdelay[si2] > g->delay_max) g->delay_max = g->srcdelay[si2];
+
+	/* ── 音源の指向性 (ADR-0014) : どこかのバンドで a < 1 なら向きが要る
+	 * (0 ベクトル・未指定は非零終了 — 黙って無指向にしない)。向きは正規化。 ── */
+	if (g->srcdir) {
+		for (n = 0; n < g->nfeed; n++) {
+			double *u = g->srcaim + 3 * n, len;
+			int b, directional = 0;
+			for (b = 0; b < GA_NBAND; b++)
+				if (g->srcdir[(size_t)n * GA_NBAND + b] < 1.0) directional = 1;
+			if (!directional) continue;
+			len = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+			if (!(len > 0.0)) {
+				ga_err(g, ".ofdx acoustic.feeds[%d]: a directivity other than "
+				       "omni needs a non-zero \"aim\": [x, y, z] (the direction "
+				       "the source faces)", n + 1);
+				return 1;
+			}
+			u[0] /= len; u[1] /= len; u[2] /= len;
+			ga_log(g, "source #%d directivity: D_b = a_b + (1-a_b) cos(theta), "
+			       "a = [%.4g %.4g %.4g %.4g %.4g %.4g %.4g] (125 Hz .. 8 kHz), "
+			       "aim = (%.4g, %.4g, %.4g); direct sound / images x D_b, "
+			       "ray energy x D_b^2", n + 1,
+			       g->srcdir[(size_t)n * GA_NBAND + 0], g->srcdir[(size_t)n * GA_NBAND + 1],
+			       g->srcdir[(size_t)n * GA_NBAND + 2], g->srcdir[(size_t)n * GA_NBAND + 3],
+			       g->srcdir[(size_t)n * GA_NBAND + 4], g->srcdir[(size_t)n * GA_NBAND + 5],
+			       g->srcdir[(size_t)n * GA_NBAND + 6], u[0], u[1], u[2]);
+		}
+	}
 
 	/* ── 音源・受音点の妥当性 (捏造しない : 室外・剛体内は失敗させる) ── */
 	for (si2 = 0; si2 < g->nsrc; si2++) {
@@ -375,16 +360,23 @@ int ga_setup(ga_t *g)
 			g->refl[w][b] = sqrt(1.0 - a);
 		}
 
-	/* ── 反射面リスト : 室の 6 面 + 障害物 (AABB) 1 個あたり 6 面 ──
-	 * 鏡像法も光線追跡もこのリストだけを見る。障害物の面が入っているので、
-	 * 障害物による低次の鏡面反射も鏡像法が扱える (v1 では遮蔽のみだった)。
-	 * 障害物は剛体 (alpha = 0) — FDTD 側の geometry の扱いと揃えてある。 */
+	/* ── 反射面リスト : 室の 6 面 + 障害物の面 ──
+	 * 箱は軸平行の 6 面、多面体は面ごとに一般の平面多角形、曲面は材質だけを
+	 * 持つ 1 面 (鏡像法には入らない)。鏡像法も光線追跡もこのリストだけを
+	 * 見るので、吸音・散乱係数・角度依存吸音の扱いが両者で一致する。
+	 * 障害物の既定は剛体 (alpha = 0) — FDTD 側の geometry の扱いと同じ。 */
 	{
-		int nmax = GA_NWALL + 6 * g->ngeom;
+		int nmax = GA_NWALL;
 		double rlo[3], rhi[3];
 		int si = 0;
 		rlo[0] = g->x0; rlo[1] = g->y0; rlo[2] = g->z0;
 		rhi[0] = g->x1; rhi[1] = g->y1; rhi[2] = g->z1;
+		for (n = 0; n < g->ngeom; n++) {
+			const ga_geom_t *o = &g->geom[n];
+			if (!o->ok) continue;
+			nmax += (o->kind == GA_SOLID_BOX) ? 6
+			      : (o->kind == GA_SOLID_POLY) ? o->nface : 1;
+		}
 		g->surf = (ga_surf_t *)calloc((size_t)nmax, sizeof(ga_surf_t));
 		if (!g->surf) {
 			ga_err(g, "out of memory (%d reflecting surfaces)", nmax);
@@ -407,6 +399,7 @@ int ga_setup(ga_t *g)
 			}
 			s->wall = w;
 			s->geom = -1;
+			s->img  = 1;
 		}
 		for (n = 0; n < g->ngeom; n++) {
 			ga_geom_t *o = &g->geom[n];
@@ -419,7 +412,37 @@ int ga_setup(ga_t *g)
 					       "an unknown shape and was ignored", n + 1);
 				continue;
 			}
-			o->surf0 = si;      /* 面の並びは 2*axis + side (光線追跡が使う) */
+			o->surf0 = si;      /* 箱 : 2*axis + side、多面体 : 面 f、曲面 : 1 面 */
+			if (o->kind != GA_SOLID_BOX) {
+				int f, nf = (o->kind == GA_SOLID_POLY) ? o->nface : 1;
+				for (f = 0; f < nf; f++) {
+					ga_surf_t *s = &g->surf[si++];
+					if (o->kind == GA_SOLID_POLY) {
+						int k;
+						s->axis = GA_SURF_PLANE;
+						memcpy(s->n, o->fn[f], sizeof(s->n));
+						s->dpl = o->fd[f];
+						s->nv  = o->fnv[f];
+						for (k = 0; k < o->fnv[f]; k++)
+							memcpy(s->v[k], o->fv[f][k], sizeof(s->v[k]));
+						s->img = (o->fnv[f] > 0);
+					}
+					else {
+						s->axis = GA_SURF_CURVED;
+						s->img  = 0;
+					}
+					for (b = 0; b < GA_NBAND; b++) {
+						double a = o->has_mat ? o->mat_alpha[b] : 0.0;
+						s->alpha[b] = a;
+						s->refl[b]  = sqrt(1.0 - a);
+						s->scatter[b] = (o->has_mat && o->mat_scatter[0] >= 0.0)
+						              ? o->mat_scatter[b] : g->scatter[b];
+					}
+					s->wall = -1;
+					s->geom = n;
+				}
+				continue;
+			}
 			for (ax = 0; ax < 3; ax++) {
 				int side, u = (ax + 1) % 3, v = (ax + 2) % 3;
 				for (side = 0; side < 2; side++) {
@@ -441,6 +464,7 @@ int ga_setup(ga_t *g)
 					}
 					s->wall = -1;
 					s->geom = n;
+					s->img  = 1;
 				}
 			}
 		}
@@ -636,7 +660,7 @@ int ga_setup(ga_t *g)
 		}
 		for (n = 0; n < g->ngeom; n++) {
 			if (!g->geom[n].ok) continue;
-			d = 0.9 * geom_distance(&g->geom[n], rv->x, rv->y, rv->z);
+			d = 0.9 * ga_solid_distance(&g->geom[n], rv->x, rv->y, rv->z);
 			if (d < lim) lim = d;
 		}
 		if (lim < 0.02) {

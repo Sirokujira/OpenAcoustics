@@ -1,17 +1,19 @@
 /* ga_trace.c — 早期反射 (鏡像法) と後期残響 (光線追跡)
  *
  * ── 鏡像法 (ga_images) ────────────────────────────────────────────
- * 反射面は「軸平行の有限矩形」の集合 surf[] : 室の 6 面 + 障害物 (AABB)
- * 1 個あたり 6 面。この集合に対する**一般化された鏡像法**なので、室壁だけの
- * 経路も、障害物を含む経路 (壁→衝立→受音点 など) も同じ手順で扱える。
- * 面が軸平行なので鏡映は 1 座標の反転で済む。
+ * 反射面は有限の平面の集合 surf[] : 室の 6 面 + 箱の障害物の 6 面 (軸平行の
+ * 矩形) + 三角柱・角錐台の面 (一般の平面凸多角形)。この集合に対する
+ * **一般化された鏡像法**なので、室壁だけの経路も、障害物を含む経路
+ * (壁→衝立→受音点 など) も同じ手順で扱える。軸平行の面の鏡映は 1 座標の
+ * 反転、一般の平面は法線方向の反転。曲面 (楕円体・楕円柱・円錐台) は鏡面像を
+ * 作れないので面集合に入らない (その反射は光線追跡が受け持つ — 下記)。
  *
  *   1. 音源から始めて、面 s の音場側にある像だけを s で鏡映して深さを進める
  *      (Borish の枝刈り : 面の裏側にある像は、その面では反射できない)。
  *   2. 各ノードで受音点から逆追跡し、反射点が**その面の矩形の内側**に
  *      落ちるかを確かめる (可視性判定の前半 = 有限面の判定)。
- *   3. 復元した折れ線の全区間を障害物 AABB と交差判定する
- *      (可視性判定の後半 = 遮蔽)。
+ *   3. 復元した折れ線の全区間を障害物の実形状と交差判定する
+ *      (可視性判定の後半 = 遮蔽。ga_shape.c)。
  * 直方体だけの室ではこれは Allen–Berkley の閉形式と厳密に一致する
  * (次数 3 で像は 63 個)。
  *
@@ -21,8 +23,10 @@
  *     (FDTD 側と合成するときの共通規約)。像でも経路長 r で同じ形になる。
  *   - R_k,b : 反射 k の圧力反射係数。角度依存吸音が off なら sqrt(1-alpha)、
  *     on なら局所反応の R(theta) = (zeta cos - 1)/(zeta cos + 1)。
- *     展開空間では経路が 1 本の直線なので、軸 a の面での cos(theta) は
- *     どの反射でも |u_a| (u = 展開直線の単位方向) で与えられる。
+ *     軸平行の面だけの経路では展開空間の経路が 1 本の直線で、軸 a の面での
+ *     cos(theta) はどの反射でも |u_a| (u = 展開直線の単位方向) で与えられる。
+ *     一般の平面を含む経路では鏡映で方向が回るので、復元した実経路の各区間
+ *     から入射角を求める。
  *   - sqrt(1 - s_k,b) : 面ごと (バンド別) の散乱係数で鏡面成分から抜ける分。
  *   - 10^(-a_b r/20) : ISO 9613-1 の空気吸収 (音圧レベル a_b [dB/m])。
  *   到達時刻は t = r/c。t = 0 は音源発火時刻なので遅延は入れない。
@@ -42,8 +46,10 @@
  * となる (自由音場で dE の総和が厳密に 1/(4 pi r)^2 になることで検算できる)。
  *
  * 二重計上の回避 : 鏡像法が厳密に受け持つ経路 — 反射回数が order 以下で
- * 一度も拡散反射していない鏡面経路 — はレイ側で検出しない。障害物の面も
- * 鏡像法の対象になったので、条件は「次数」と「拡散したか」だけで決まる。
+ * 一度も拡散反射しておらず、曲面に一度も当たっていない鏡面経路 — はレイ側で
+ * 検出しない。平面の障害物の面は鏡像法の対象なので、条件は「次数」「拡散
+ * したか」「曲面に当たったか」の 3 つで決まる (曲面経路は鏡像法に無いので
+ * レイが数えないと取りこぼす)。
  * 散乱係数 s_b のぶんは鏡像の振幅から面ごと・バンドごとに sqrt(1-s_b) で
  * 抜いてあり、レイ側は重み付き抽選 (下記) で期待値どおり s_b / (1-s_b) を
  * 運ぶので、「鏡面成分 = 鏡像法、拡散成分 = レイ」で過不足なく 1 回ずつ
@@ -94,29 +100,78 @@ static int seg_hits_box(const double p0[3], const double p1[3],
 	return 1;
 }
 
+/* 線分が障害物の内部を通るか。箱は従来どおりの判定 (箱だけの入力の結果は
+ * ビット単位で不変)、他の形状は実形状との交差 (ga_shape.c — 両端を
+ * GA_SEG_EPS だけ縮め、かすめるだけの接触は遮蔽としない)。 */
 static int any_obstacle_hits(const ga_t *g, const double p0[3], const double p1[3])
 {
 	int n;
 	for (n = 0; n < g->ngeom; n++) {
-		if (!g->geom[n].ok) continue;
-		if (seg_hits_box(p0, p1, g->geom[n].lo, g->geom[n].hi)) return 1;
+		const ga_geom_t *o = &g->geom[n];
+		if (!o->ok) continue;
+		if (o->kind == GA_SOLID_BOX) {
+			if (seg_hits_box(p0, p1, o->lo, o->hi)) return 1;
+		}
+		else {
+			double d[3], t, nrm[3];
+			int face;
+			d[0] = p1[0] - p0[0]; d[1] = p1[1] - p0[1]; d[2] = p1[2] - p0[2];
+			if (ga_solid_entry(o, p0, d, GA_SEG_EPS, 1.0 - GA_SEG_EPS,
+			                   &t, nrm, &face))
+				return 1;
+		}
 	}
 	return 0;
 }
 
 /* ── 反射面の基本演算 ───────────────────────────────────────────── */
 
-/* 面 s による鏡映 (軸平行なので 1 座標の反転) */
+/* 面 s による鏡映 (軸平行なら 1 座標の反転、一般の平面は法線方向の反転) */
 static void surf_mirror(const ga_surf_t *s, const double p[3], double q[3])
 {
 	q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
-	q[s->axis] = 2.0 * s->coord - p[s->axis];
+	if (s->axis >= 0) {
+		q[s->axis] = 2.0 * s->coord - p[s->axis];
+	}
+	else {
+		double h = p[0] * s->n[0] + p[1] * s->n[1] + p[2] * s->n[2] - s->dpl;
+		q[0] = p[0] - 2.0 * h * s->n[0];
+		q[1] = p[1] - 2.0 * h * s->n[1];
+		q[2] = p[2] - 2.0 * h * s->n[2];
+	}
 }
 
 /* 面 s の音場側から測った符号付き距離 (> 0 なら反射できる側にいる) */
 static double surf_front(const ga_surf_t *s, const double p[3])
 {
-	return (p[s->axis] - s->coord) * s->nrm;
+	if (s->axis >= 0) return (p[s->axis] - s->coord) * s->nrm;
+	return p[0] * s->n[0] + p[1] * s->n[1] + p[2] * s->n[2] - s->dpl;
+}
+
+/* 点 X (面の平面上) が平面凸多角形の内側 (辺を含む) か。頂点は法線の
+ * まわりに反時計回り。 */
+static int surf_poly_contains(const ga_surf_t *s, const double X[3])
+{
+	int i;
+	double scale = 0.0;
+	for (i = 0; i < s->nv; i++) {
+		const double *a = s->v[i], *b = s->v[(i + 1) % s->nv];
+		double e = fabs(b[0] - a[0]) + fabs(b[1] - a[1]) + fabs(b[2] - a[2]);
+		if (e > scale) scale = e;
+	}
+	for (i = 0; i < s->nv; i++) {
+		const double *a = s->v[i], *b = s->v[(i + 1) % s->nv];
+		double e[3], r[3], c[3];
+		e[0] = b[0] - a[0]; e[1] = b[1] - a[1]; e[2] = b[2] - a[2];
+		r[0] = X[0] - a[0]; r[1] = X[1] - a[1]; r[2] = X[2] - a[2];
+		c[0] = e[1] * r[2] - e[2] * r[1];
+		c[1] = e[2] * r[0] - e[0] * r[2];
+		c[2] = e[0] * r[1] - e[1] * r[0];
+		if (c[0] * s->n[0] + c[1] * s->n[1] + c[2] * s->n[2]
+		    < -1e-12 * scale * scale)
+			return 0;
+	}
+	return 1;
 }
 
 /* 入射角 cos(theta) での圧力反射係数 (符号つき — 位相反転も表す) */
@@ -137,6 +192,8 @@ typedef struct {
 	double  recv[3];
 	double  src[3];
 	double  sgain;     /* 音源のゲイン (振幅に掛かる — ADR-0010 Decision 7) */
+	const double *sdir; /* 音源の指向性 a_b (GA_NBAND) / NULL = 無指向 (ADR-0014) */
+	const double *saim; /* 正規化した向き (sdir があるときだけ) */
 	double  sdelay;    /* 音源の発火時刻 [s] (到達は sdelay + r/c) */
 	long    nodes;
 	int     truncated;
@@ -187,7 +244,7 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 	const double *I = chain[depth];
 	double u[3], r, amp[GA_NBAND], gain, ct[GA_ORDER_MAX];
 	double pts[GA_ORDER_MAX + 2][3];
-	int i, k, b;
+	int i, k, b, general = 0;
 
 	u[0] = c->recv[0] - I[0];
 	u[1] = c->recv[1] - I[1];
@@ -204,9 +261,28 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 		const ga_surf_t *s = &g->surf[seq[depth - i]];
 		const double *P = pts[i - 1];
 		const double *T = chain[depth - i + 1];
-		double den = T[s->axis] - P[s->axis];
-		double t, X[3];
+		double den, t, X[3];
 		int a = s->axis, uu, vv;
+		if (a < 0) {
+			/* 一般の平面 (多面体の面) : 直線 P -> T と平面 n.x = dpl の交点が
+			 * 多角形の内側に落ちるか */
+			const double *nn = s->n;
+			double dpp = P[0] * nn[0] + P[1] * nn[1] + P[2] * nn[2];
+			den = (T[0] - P[0]) * nn[0] + (T[1] - P[1]) * nn[1]
+			    + (T[2] - P[2]) * nn[2];
+			if (fabs(den) < 1e-15) return;
+			t = (s->dpl - dpp) / den;
+			if (!(t > -1e-9 && t < 1.0 - 1e-12)) return;
+			if (t < 0.0) t = 0.0;
+			X[0] = P[0] + t * (T[0] - P[0]);
+			X[1] = P[1] + t * (T[1] - P[1]);
+			X[2] = P[2] + t * (T[2] - P[2]);
+			if (!surf_poly_contains(s, X)) return;
+			pts[i][0] = X[0]; pts[i][1] = X[1]; pts[i][2] = X[2];
+			general = 1;
+			continue;
+		}
+		den = T[s->axis] - P[s->axis];
 		if (fabs(den) < 1e-15) return;
 		t = (s->coord - P[s->axis]) / den;
 		/* t = 0 は「前の反射点と同じ場所」= 稜線に落ちる縮退経路。物理的には
@@ -243,7 +319,20 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 	gain = c->sgain / (4.0 * GA_PI * r);
 	for (k = 0; k < depth; k++) {
 		const ga_surf_t *s = &g->surf[seq[k]];
-		ct[k] = fabs(u[s->axis]);
+		if (!general) {
+			ct[k] = fabs(u[s->axis]);       /* 軸平行の面だけ : 展開直線の成分 */
+		}
+		else {
+			/* 一般の平面を含む : 実経路の入射区間 (音源側 -> 反射点) から。
+			 * 反射 seq[k] は pts[depth - k]、入射はその 1 つ音源側から来る。 */
+			const double *X = pts[depth - k], *Y = pts[depth - k + 1];
+			double e[3], el, en;
+			e[0] = X[0] - Y[0]; e[1] = X[1] - Y[1]; e[2] = X[2] - Y[2];
+			el = sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+			en = (s->axis >= 0) ? e[s->axis]
+			   : e[0] * s->n[0] + e[1] * s->n[1] + e[2] * s->n[2];
+			ct[k] = (el > 0.0) ? fabs(en) / el : 1.0;
+		}
 		if (s->suni) gain *= sqrt(1.0 - s->scatter[0]);
 	}
 	for (b = 0; b < GA_NBAND; b++) {
@@ -254,6 +343,20 @@ static void img_visit(imgctx_t *c, double chain[][3], const int *seq, int depth)
 			if (!s->suni) v *= sqrt(1.0 - s->scatter[b]);
 		}
 		amp[b] = v;
+	}
+	/* 音源の指向性 (ADR-0014) : 放射方向 = 音源から最初の反射点 (直接音なら
+	 * 受音点) へ向かう方向。D_b = a_b + (1-a_b) cos を振幅に掛ける (負なら
+	 * 背面ローブの極性反転 — 物理どおり)。無指向 (sdir = NULL) は何もしない。 */
+	if (c->sdir) {
+		double e[3], el, ce;
+		e[0] = pts[depth][0] - c->src[0];
+		e[1] = pts[depth][1] - c->src[1];
+		e[2] = pts[depth][2] - c->src[2];
+		el = sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+		ce = (el > 0.0) ? (e[0] * c->saim[0] + e[1] * c->saim[1]
+		                   + e[2] * c->saim[2]) / el : 1.0;
+		for (b = 0; b < GA_NBAND; b++)
+			amp[b] *= c->sdir[b] + (1.0 - c->sdir[b]) * ce;
 	}
 	/* 全バンドで消えている像は置かない (alpha = 1 の壁など) */
 	for (b = 0; b < GA_NBAND; b++)
@@ -272,6 +375,7 @@ static void img_recurse(imgctx_t *c, double chain[][3], int *seq, int depth)
 	if (depth >= g->order) return;
 	for (si = 0; si < g->nsurf; si++) {
 		const ga_surf_t *s = &g->surf[si];
+		if (!s->img) continue;                 /* 曲面・面積 0 の面 */
 		if (depth > 0 && seq[depth - 1] == si) continue;
 		if (surf_front(s, chain[depth]) <= 1e-12) continue;
 		if (++c->nodes > GA_IMAGE_NODE_MAX) { c->truncated = 1; return; }
@@ -300,6 +404,12 @@ int ga_images(ga_t *g, int ri, int si, double *band)
 	c.src[2] = g->feedpos[3 * si + 2];
 	c.sgain  = g->srcgain[si];
 	c.sdelay = g->srcdelay[si];
+	if (g->srcdir) {
+		const double *a = g->srcdir + (size_t)si * GA_NBAND;
+		int b, directional = 0;
+		for (b = 0; b < GA_NBAND; b++) if (a[b] < 1.0) directional = 1;
+		if (directional) { c.sdir = a; c.saim = g->srcaim + 3 * si; }
+	}
 	chain[0][0] = c.src[0]; chain[0][1] = c.src[1]; chain[0][2] = c.src[2];
 
 	/* nimage/nblocked は加算のみ (リセットとまとめログは ga_synth —
@@ -382,9 +492,32 @@ static double wall_exit(const ga_t *g, const double p[3], const double d[3],
 	return best;
 }
 
-/* 障害物への最短入射 (無ければ負を返す)。当たった面の surf[] 添字も返す */
+/* 一般の法線 nrm の半球へ cos 重みで散乱させる (曲面・斜めの平面用)。
+ * 接平面の基底は法線から決定的に作る (乱数は使わない)。 */
+static void lambert_dir_n(double d[3], const double nrm[3], double u1, double u2)
+{
+	double ct = sqrt(u1);
+	double st = sqrt((u1 < 1.0) ? (1.0 - u1) : 0.0);
+	double ph = 2.0 * GA_PI * u2, cp = cos(ph), sp = sin(ph);
+	double a[3] = { 0.0, 0.0, 0.0 }, t1[3], t2[3], l;
+	int k;
+	if (fabs(nrm[0]) < 0.9) a[0] = 1.0; else a[1] = 1.0;
+	t1[0] = nrm[1] * a[2] - nrm[2] * a[1];
+	t1[1] = nrm[2] * a[0] - nrm[0] * a[2];
+	t1[2] = nrm[0] * a[1] - nrm[1] * a[0];
+	l = sqrt(t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]);
+	t1[0] /= l; t1[1] /= l; t1[2] /= l;
+	t2[0] = nrm[1] * t1[2] - nrm[2] * t1[1];
+	t2[1] = nrm[2] * t1[0] - nrm[0] * t1[2];
+	t2[2] = nrm[0] * t1[1] - nrm[1] * t1[0];
+	for (k = 0; k < 3; k++) d[k] = ct * nrm[k] + st * (cp * t1[k] + sp * t2[k]);
+}
+
+/* 障害物への最短入射 (無ければ負を返す)。当たった面の surf[] 添字も返す。
+ * 箱は従来どおり軸 *axis (>= 0) を返す。他の形状は *axis = -1 とし、外向き
+ * 単位法線を hn に返す (曲面なら当たった点の法線)。 */
 static double obstacle_entry(const ga_t *g, const double p[3], const double d[3],
-                             double tlimit, int *sidx, int *axis)
+                             double tlimit, int *sidx, int *axis, double hn[3])
 {
 	double best = -1.0;
 	int n, ba = -1, bs = -1;
@@ -393,6 +526,18 @@ static double obstacle_entry(const ga_t *g, const double p[3], const double d[3]
 		double tnear = -1e300, tfar = 1e300;
 		int i, na = -1, nside = 0, hit = 1;
 		if (!o->ok || o->surf0 < 0) continue;
+		if (o->kind != GA_SOLID_BOX) {
+			double t, nrm[3];
+			int face;
+			if (!ga_solid_entry(o, p, d, 1e-9, tlimit, &t, nrm, &face)) continue;
+			if (best < 0.0 || t < best) {
+				best = t;
+				ba = -1;
+				bs = (o->kind == GA_SOLID_POLY) ? o->surf0 + face : o->surf0;
+				hn[0] = nrm[0]; hn[1] = nrm[1]; hn[2] = nrm[2];
+			}
+			continue;
+		}
 		for (i = 0; i < 3; i++) {
 			if (fabs(d[i]) < 1e-15) {
 				if (p[i] < o->lo[i] || p[i] > o->hi[i]) { hit = 0; break; }
@@ -448,14 +593,22 @@ int ga_rays(ga_t *g)
 	const double sgain2 = g->srcgain[sidx] * g->srcgain[sidx];
 	const double smax   = GA_C0 * (g->duration - sdelay);
 	const double einit  = sgain2 / (double)g->nrays;
+	/* 音源の指向性 (ADR-0014) — 無指向の音源は NULL (従来とビット等価) */
+	const double *sdir = NULL, *saim = NULL;
 	/* 音源ごとに決定的ハッシュ列を先頭から使う : 単一音源の既定動作と
 	 * 一致し、multi_source の各音源も単独実行と同じ列になる */
 	g->qidx = 0;
+	if (g->srcdir) {
+		const double *a = g->srcdir + (size_t)sidx * GA_NBAND;
+		int b2, directional = 0;
+		for (b2 = 0; b2 < GA_NBAND; b2++) if (a[b2] < 1.0) directional = 1;
+		if (directional) { sdir = a; saim = g->srcaim + 3 * sidx; }
+	}
 	if (smax <= 0.0 || einit <= 0.0) continue;   /* 窓外 / gain = 0 は寄与なし */
 	for (i = 0; i < g->nrays; i++) {
 		double p[3], d[3], w[GA_NBAND];
 		double z, rxy, phi, s = 0.0;
-		int nref = 0, scattered = 0, bounce, b;
+		int nref = 0, scattered = 0, curved = 0, bounce, b;
 
 		z   = 1.0 - (2.0 * i + 1.0) / (double)g->nrays;
 		rxy = sqrt((z * z < 1.0) ? (1.0 - z * z) : 0.0);
@@ -467,15 +620,22 @@ int ga_rays(ga_t *g)
 		p[1] = g->feedpos[3 * sidx + 1];
 		p[2] = g->feedpos[3 * sidx + 2];
 		for (b = 0; b < GA_NBAND; b++) w[b] = einit;
+		if (sdir) {   /* 指向性 (ADR-0014) : 発射方向の D_b^2 をエネルギーに */
+			const double ce = d[0] * saim[0] + d[1] * saim[1] + d[2] * saim[2];
+			for (b = 0; b < GA_NBAND; b++) {
+				const double D = sdir[b] + (1.0 - sdir[b]) * ce;
+				w[b] = einit * D * D;
+			}
+		}
 
 		for (bounce = 0; bounce < GA_MAXBOUNCE; bounce++) {
 			int wsidx, waxis, osidx, oaxis, sidx, hitaxis;
-			double tw, tobs, thit;
+			double tw, tobs, thit, hn[3] = { 0.0, 0.0, 0.0 };
 			int last = 0, r;
 
 			tw = wall_exit(g, p, d, &wsidx, &waxis);
 			if (!(tw > 0.0) || tw > 1e299) break;   /* 退化 : 打ち切る */
-			tobs = obstacle_entry(g, p, d, tw, &osidx, &oaxis);
+			tobs = obstacle_entry(g, p, d, tw, &osidx, &oaxis, hn);
 			thit = tw;
 			sidx = wsidx;
 			hitaxis = waxis;
@@ -486,9 +646,10 @@ int ga_rays(ga_t *g)
 			if (thit <= 0.0) break;
 
 			/* 受音球の通過。鏡像法が厳密に受け持つ経路 — 次数 order 以下で
-			 * 一度も拡散していない鏡面経路 — は数えない (二重計上の回避)。
-			 * 障害物の面も鏡像法の対象なので、条件に障害物は入らない。 */
-			if (!(nref <= g->order && !scattered)) {
+			 * 一度も拡散しておらず曲面にも当たっていない鏡面経路 — は数えない
+			 * (二重計上の回避)。平面の障害物の面は鏡像法の対象なので条件に
+			 * 入らない。曲面は鏡像法に無いので、当たった経路はレイが数える。 */
+			if (!(nref <= g->order && !scattered && !curved)) {
 				for (r = 0; r < g->nrecv; r++) {
 					const ga_recv_t *rv = &g->recv[r];
 					double u[3], tc, dist2, rad = rv->radius;
@@ -523,14 +684,19 @@ int ga_rays(ga_t *g)
 			g->nbounce++;
 			if (last) break;
 
-			/* 反射 : 面の吸音を掛け、割合 s で拡散 (Lambert)、残りは鏡面 */
+			/* 反射 : 面の吸音を掛け、割合 s で拡散 (Lambert)、残りは鏡面。
+			 * 軸平行の面 (室壁・箱) は従来どおりの経路、他の障害物の面は
+			 * 外向き法線 hn でのベクトル演算 (曲面は当たった点の法線)。 */
 			{
 				const ga_surf_t *sf = &g->surf[sidx];
 				int    ax  = hitaxis;
-				double sgn = (d[ax] > 0.0) ? -1.0 : 1.0;   /* 音場側の法線 */
-				double ct  = fabs(d[ax]);
+				double sgn = (ax >= 0) ? ((d[ax] > 0.0) ? -1.0 : 1.0) : 1.0;
+				double dn  = (ax >= 0) ? 0.0
+				           : d[0] * hn[0] + d[1] * hn[1] + d[2] * hn[2];
+				double ct  = (ax >= 0) ? fabs(d[ax]) : fabs(dn);
 				uint32_t q = (uint32_t)g->qidx * 3u;
 				int diffuse = 0;
+				if (sf->axis == GA_SURF_CURVED) curved = 1;
 
 				for (b = 0; b < GA_NBAND; b++) {
 					double rr = surf_refl(g, sf, b, ct);
@@ -549,21 +715,38 @@ int ga_rays(ga_t *g)
 					if (!sf->suni)
 						for (b = 0; b < GA_NBAND; b++)
 							w[b] *= sf->scatter[b] / sf->sref;
-					lambert_dir(d, ax, sgn, hash01(q + 1u), hash01(q + 2u));
+					if (ax >= 0)
+						lambert_dir(d, ax, sgn, hash01(q + 1u), hash01(q + 2u));
+					else
+						lambert_dir_n(d, hn, hash01(q + 1u), hash01(q + 2u));
 					scattered = 1;
 				}
 				else {
 					if (!sf->suni)
 						for (b = 0; b < GA_NBAND; b++)
 							w[b] *= (1.0 - sf->scatter[b]) / (1.0 - sf->sref);
-					d[ax] = -d[ax];
+					if (ax >= 0) {
+						d[ax] = -d[ax];
+					}
+					else {
+						d[0] -= 2.0 * dn * hn[0];
+						d[1] -= 2.0 * dn * hn[1];
+						d[2] -= 2.0 * dn * hn[2];
+					}
 				}
 				g->qidx++;
 				/* 面から僅かに離して自己交差を避ける */
-				p[ax] += sgn * GA_EPS;
-				if (sf->wall >= 0) {
-					if (p[ax] < lo[ax]) p[ax] = lo[ax];
-					if (p[ax] > hi[ax]) p[ax] = hi[ax];
+				if (ax >= 0) {
+					p[ax] += sgn * GA_EPS;
+					if (sf->wall >= 0) {
+						if (p[ax] < lo[ax]) p[ax] = lo[ax];
+						if (p[ax] > hi[ax]) p[ax] = hi[ax];
+					}
+				}
+				else {
+					p[0] += GA_EPS * hn[0];
+					p[1] += GA_EPS * hn[1];
+					p[2] += GA_EPS * hn[2];
 				}
 			}
 			nref++;

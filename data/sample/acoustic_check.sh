@@ -12,8 +12,14 @@
 #  (i) 角度依存吸音 (opt-in) : Paris の逆解 zeta で境界を作り、垂直入射の
 #      R = (zeta-1)/(zeta+1) が ±3%。false 指定は既定とビット一致、
 #      alpha > 0.9512 はクランプ + warning
+#  (o) 障害物の材質 (acoustic.obstacles) : 吸音性の障害物の面の R = sqrt(1-alpha)
+#      ±3%、同じ位置の外壁と rir.wav がビット一致 (角度依存も)、キーなしは
+#      剛体のまま、acoustic.ga.obstacles は読まない、不正な番号は非零終了
 #  (c) 直接音到達 : |p| ピークが t = t0 + r/c ± (sigma + 2/fs)
 #  (d) 剛壁のみ (alpha=0) でエネルギー保存 (1.4 s 窓 2 つの減衰 < 0.5 dB)
+#  (v) 非直方体の geometry : 13 種の shape のボクセル体積が解析値と ±5%、
+#      重心 ±dx/2、外接範囲 ±2dx。外接箱の内側・形状の外の受音点が通り、
+#      形状の中の受音点は形状を名指しして拒否される
 #  (e) 決定性 : 同一入力 2 回 / OMP_NUM_THREADS=1 と 4 で rir.wav ビット一致
 #  (f) 契約 : 出力 4 ファイル、WAV ヘッダ、progress 行書式、異常系の非零終了
 #  (h) 複数音源 (multi_source) : 2 feed の同時発火が各 feed 単独の和に一致
@@ -35,7 +41,8 @@
 #  (B2) 面ごとの散乱係数が室全体の既定を上書きする (床 s = 0 / 1)
 #  (I) 局所反応境界の角度依存反射 R(theta) が Paris の式の逆解と ±1%
 #  (J) 障害物の材質 (acoustic.ga.obstacles) : alpha で鏡面反射が
-#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了
+#      sqrt(1-alpha) 倍、scattering = 1 で鏡面像が消える、不正 index は非零終了、
+#      acoustic 直下 (FDTD と共有) でも同じ板、両方あれば acoustic.ga が優先
 #  (K) 複数音源 (multi_source) : 2 音源の直接音がそれぞれ 1/(4 pi r_i) ±1%、
 #      既定は feed #1 のみ + warning (後方互換)、室外の音源は非零終了
 #  (K2) feed ごとのゲイン・遅延 (acoustic.feeds) : 直接音がそれぞれ
@@ -313,6 +320,64 @@ else
 	say_ng "angle-dep alpha clamp"
 fi
 
+echo "--- (o) absorbing obstacle face (.ofdx acoustic.obstacles, +-3% / bit-identical)"
+# 障害物の材質を FDTD でも扱う。tube_obstacle は tube_a03 の管を 9 m に延ばして
+# x = 8..9 m を障害物で埋めたもの — その面 (x = 8 m) は tube_a03 の右端の壁と
+# 同じ位置で、alpha も同じ。障害物の面は外壁と同じ半陰的インピーダンス更新
+# なので、R = sqrt(0.7) かつ rir.wav が tube_a03 とバイト一致する (導出は
+# tube_obstacle.ofd)。キーを外せば従来どおり剛体 (R = 1)、幾何音響専用の
+# acoustic.ga.obstacles は FDTD では読まない。
+run_case tube_obstacle tube_obstacle.ofd tube_obstacle.ofdx && {
+	res=$(tube_R "$WORK/tube_obstacle" "$fs_tube")
+	chk "obstacle face R (a=0.3)" "${res#* }" 0.836660027 0.03   # sqrt(0.7)
+	if cmp -s "$WORK/tube_a03/rir.wav" "$WORK/tube_obstacle/rir.wav"; then
+		say_ok "obstacle face == wall" " (tube_a03 と rir.wav がビット一致)"
+	else
+		say_ng "obstacle face == wall"
+	fi
+	if grep -q '"boundary_alpha": 0.3, "boundary_zeta": [0-9.]*, "impedance_faces": 1 }' \
+	        "$WORK/tube_obstacle/metadata.json"; then
+		say_ok "obstacle metadata" " (geometry_voxels: alpha 0.3, 1 face)"
+	else
+		say_ng "obstacle metadata"
+	fi
+}
+tube_variant() {   # tube_variant <case> <sed 式> : tube_obstacle の .ofdx だけを変えて実行
+	rm -rf "$WORK/$1"; mkdir -p "$WORK/$1"
+	cp "$SRC/tube_obstacle.ofd" "$WORK/$1/"
+	sed "$2" "$SRC/tube_obstacle.ofdx" > "$WORK/$1/tube_obstacle.ofdx"
+	"$SOLVER" "$WORK/$1" > /dev/null 2> "$WORK/$1/stderr.log"
+}
+# キーなし -> 障害物は剛体のまま (従来動作) : 右端の反射 R = 1
+if tube_variant tube_obs_rigid '/"obstacles":/d'; then
+	res=$(tube_R "$WORK/tube_obs_rigid" "$fs_tube")
+	chk "obstacle default rigid R" "${res#* }" 1.0 0.03
+else
+	say_ng "obstacle default rigid R" " (solver failed)"
+fi
+# 幾何音響専用の acoustic.ga.obstacles だけ -> FDTD は読まない (剛体と同一)
+if tube_variant tube_obs_gaonly 's/^    "obstacles": \(.*\),$/    "ga": { "obstacles": \1 },/' &&
+   cmp -s "$WORK/tube_obs_rigid/rir.wav" "$WORK/tube_obs_gaonly/rir.wav"; then
+	say_ok "FDTD ignores ga.obstacles" " (剛体のときとビット一致)"
+else
+	say_ng "FDTD ignores ga.obstacles"
+fi
+# 角度依存吸音も障害物の面に効く : tube_angle (外壁で同じ設定) とビット一致
+if tube_variant tube_obs_angle 's/"acoustic": {/"acoustic": { "angle_dependent_absorption": true,/' &&
+   cmp -s "$WORK/tube_angle/rir.wav" "$WORK/tube_obs_angle/rir.wav"; then
+	say_ok "obstacle angle-dep == wall" " (tube_angle とビット一致)"
+else
+	say_ng "obstacle angle-dep == wall"
+fi
+# 存在しない geometry を指す行は非零終了 (幾何音響側と同じ規則)
+if tube_variant tube_obs_bad 's/"geometry": 1,/"geometry": 9,/'; then
+	say_ng "obstacle bad index exit" " (should fail)"
+elif grep -q "acoustic.obstacles: geometry = 9" "$WORK/tube_obs_bad/stderr.log"; then
+	say_ok "obstacle bad index exit" " (refused with the reason)"
+else
+	say_ng "obstacle bad index exit" " (no reason on stderr)"
+fi
+
 echo "--- (c) direct sound arrival t = t0 + r/c"
 # 全壁 alpha=1 の部屋で r=3.0 m。受音波形は s(t) の時間微分 (Ricker 型、
 # 対称) なので |p| ピークはパルス中心に一致する。許容 sigma + 2/fs の
@@ -337,16 +402,117 @@ run_case box_pillar box_pillar.ofd && {
 	grep -q "normal end" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "box_pillar normal end" \
 		|| { printf "%-26s -> NG\n" "box_pillar normal end" >&2; status=1; }
-	# 複数 feed の warning と AABB 近似の warning が明示されること (v1 仕様)
+	# 複数 feed の warning が明示されること (v1 仕様)。円柱 (shape 13) は
+	# 外接箱で近似せず形状どおりにボクセル化され、その結果がログに出る
+	# (形状の精度そのものは下の (v) で解析値と比べる)。
 	grep -q "warning: 2 feeds" "$d/solver.log" \
 		&& printf "%-26s -> OK\n" "multi-feed warning" \
 		|| { printf "%-26s -> NG\n" "multi-feed warning" >&2; status=1; }
-	grep -q "AABB" "$d/solver.log" \
-		&& printf "%-26s -> OK\n" "AABB approx warning" \
-		|| { printf "%-26s -> NG\n" "AABB approx warning" >&2; status=1; }
+	if grep -q "voxelizer: geometry #2 shape 13 -> 40 cells" "$d/solver.log" &&
+	   ! grep -q "AABB" "$d/solver.log"; then
+		say_ok "exact voxelization log"
+	else
+		say_ng "exact voxelization log"
+	fi
 	# 吸音表なし -> 既定 alpha=0.1 の 6 面から T_Sabine = 0.409 s (導出は .ofd)
 	chk "default-alpha T_Sabine" "$(awk -F: '/t_sabine_s/ {gsub(/[ ,\r]/, "", $2); print $2}' "$d/metrics.json")" 0.4093 0.01
 }
+
+echo "--- (v) exact voxelization of every shape (volume +-5%, centroid +-dx/2)"
+# 本家 OpenFDTD の 13 種の shape を形状どおりに剛体化すること。期待値は
+# .ofd の geometry 行から下の awk が**解析的に**計算する (楕円体 pi/6 LxLyLz、
+# 円柱 pi/4 LxLyLz、三角柱 L*面積、錐台 L*int a b dt — 導出・許容の根拠は
+# voxel_shapes.ofd)。ソルバーの内外判定は使わない。
+vox_expect() {   # vox_expect <ofd> : 1 行 1 形状 "shape V cx cy cz wx wy wz"
+	awk 'function ab(x) { return (x < 0) ? -x : x }
+		function mx(a, b) { return (a > b) ? a : b }
+		function mn(a, b) { return (a < b) ? a : b }
+		BEGIN { PI = atan2(0, -1) }
+		/^geometry *=/ {
+			line = $0; sub(/^geometry *= */, "", line)
+			n = split(line, f, /[ \t]+/); s = f[2] + 0
+			for (i = 0; i < 8; i++) g[i] = (i + 3 <= n) ? f[i + 3] + 0 : 0
+			if (s == 1 || s == 2 || (s >= 11 && s <= 13)) {
+				for (a = 0; a < 3; a++) {
+					w[a] = ab(g[2*a + 1] - g[2*a]); c[a] = (g[2*a] + g[2*a + 1]) / 2
+				}
+				V = w[0] * w[1] * w[2] * ((s == 1) ? 1 : (s == 2) ? PI / 6 : PI / 4)
+			} else if (s >= 31 && s <= 33) {
+				ax = s - 31; u = (ax + 1) % 3; v = (ax + 2) % 3
+				w[ax] = ab(g[1] - g[0]); c[ax] = (g[0] + g[1]) / 2
+				c[u] = (g[2] + g[3] + g[4]) / 3; c[v] = (g[5] + g[6] + g[7]) / 3
+				w[u] = mx(mx(g[2], g[3]), g[4]) - mn(mn(g[2], g[3]), g[4])
+				w[v] = mx(mx(g[5], g[6]), g[7]) - mn(mn(g[5], g[6]), g[7])
+				V = w[ax] * ab((g[3] - g[2]) * (g[7] - g[5]) - (g[6] - g[5]) * (g[4] - g[2])) / 2
+			} else {
+				ax = (s % 10) - 1; u = (ax + 1) % 3; v = (ax + 2) % 3
+				L = g[1] - g[0]; a1 = g[4]; b1 = g[5]; da = g[6] - a1; db = g[7] - b1
+				I0 = a1 * b1 + (a1 * db + b1 * da) / 2 + da * db / 3
+				I1 = a1 * b1 / 2 + (a1 * db + b1 * da) / 3 + da * db / 4
+				V = ab(L) * I0 * ((s < 50) ? 1 : PI / 4)
+				c[ax] = g[0] + L * I1 / I0; c[u] = g[2]; c[v] = g[3]
+				w[ax] = ab(L); w[u] = mx(a1, g[6]); w[v] = mx(b1, g[7])
+			}
+			printf "%d %.10g %.10g %.10g %.10g %.10g %.10g %.10g\n", s, V, c[0], c[1], c[2], w[0], w[1], w[2]
+		}' "$1"
+}
+vox_actual() {   # vox_actual <metadata.json> : "shape cells V cx cy cz x1 x2 y1 y2 z1 z2"
+	awk '/"geometry_voxels"/ { on = 1; next }
+		on && /\]/ && !/"shape"/ { on = 0 }
+		on && /"shape"/ { l = $0; gsub(/"[a-z_0-9]+":/, "", l); gsub(/[][{},]/, " ", l)
+			$0 = l; $1 = $1; print }' "$1"
+}
+# (v-a) 形状の精度 : 受音点 #1〜#4 を外した入力で測る (受音点の受理と切り離し、
+# 形状の誤りが体積・重心・外接範囲のずれとして必ず読めるようにする)
+rm -rf "$WORK/voxel_vol"; mkdir -p "$WORK/voxel_vol"
+sed -e '/^point = z 0.125 0.175 0.125$/d' -e '/^point = z 1.125 0.175 0.125$/d' \
+    -e '/^point = z 1.525 0.375 0.125$/d' -e '/^point = z 2.225 0.175 0.475$/d' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_vol/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_vol/"
+if "$SOLVER" "$WORK/voxel_vol" > /dev/null 2> "$WORK/voxel_vol/stderr.log"; then
+	d="$WORK/voxel_vol"
+	vox_expect "$SRC/voxel_shapes.ofd" > "$d/vox_expect.txt"
+	vox_actual "$d/metadata.json" > "$d/vox_actual.txt"
+	paste -d ' ' "$d/vox_expect.txt" "$d/vox_actual.txt" > "$d/vox_pair.txt"
+	[ "$(wc -l < "$d/vox_pair.txt")" -eq 13 ] || say_ng "voxel shape count" " ($(wc -l < "$d/vox_pair.txt") lines)"
+	while read -r line; do
+		echo "$line" | awk '{
+			s = $1; Ve = $2; Va = $11; dv = (Va - Ve) / Ve; adv = (dv < 0) ? -dv : dv
+			dc = 0; dw = 0
+			for (a = 0; a < 3; a++) {
+				e = $(3 + a) - $(12 + a); if (e < 0) e = -e; if (e > dc) dc = e
+				e = $(6 + a) - ($(16 + 2*a) - $(15 + 2*a)); if (e < 0) e = -e; if (e > dw) dw = e
+			}
+			ok = (adv <= 0.05 && dc <= 0.025 && dw <= 0.1 && $9 == s)
+			printf "%-26s V=%.5f expected=%.5f %+.2f%%, |dc|<=%.3f |dw|<=%.3f m -> %s\n",
+			       sprintf("voxel shape %d", s), Va, Ve, dv * 100, dc, dw, ok ? "OK" : "NG"
+			exit ok ? 0 : 1 }' || status=1
+	done < "$d/vox_pair.txt"
+else
+	say_ng "voxel shapes run" " ($(head -1 "$WORK/voxel_vol/stderr.log"))"
+fi
+# (v-b) 受音点 #1〜#4 は外接箱の内側だが形状の外 (#2〜#4 は円柱の軸を取り
+# 違えると形状の中になる位置)。正常終了 = 形状どおりに判定されている。
+rm -rf "$WORK/voxel_shapes"; mkdir -p "$WORK/voxel_shapes"
+cp "$SRC/voxel_shapes.ofd" "$SRC/voxel_shapes.ofdx" "$WORK/voxel_shapes/"
+if "$SOLVER" "$WORK/voxel_shapes" > /dev/null 2> "$WORK/voxel_shapes/stderr.log" &&
+   grep -q "normal end" "$WORK/voxel_shapes/solver.log"; then
+	say_ok "voxel AABB-only points" " (外接箱の隅の受音点 4 点を受理)"
+else
+	say_ng "voxel AABB-only points" " ($(head -1 "$WORK/voxel_shapes/stderr.log"))"
+fi
+# 形状の中の受音点は (外接箱ではなく) 形状の判定で拒否され、どの形状かを名指しする
+rm -rf "$WORK/voxel_inside"; mkdir -p "$WORK/voxel_inside"
+sed 's/^point = z 0.125 0.175 0.125$/point = z 0.425 0.425 0.375/' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/voxel_inside/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/voxel_inside/"
+if "$SOLVER" "$WORK/voxel_inside" > /dev/null 2> "$WORK/voxel_inside/stderr.log"; then
+	say_ng "voxel inside-point exit" " (accepted a point inside the ellipsoid)"
+elif grep -q "inside rigid geometry #1 (shape 2)" "$WORK/voxel_inside/stderr.log"; then
+	say_ok "voxel inside-point exit" " (refused, names geometry #1)"
+else
+	say_ng "voxel inside-point exit" " (no reason on stderr)"
+fi
 
 echo "--- (e) determinism (bit-identical reruns and thread invariance)"
 # 乱数不使用。OpenMP 並列 (p 更新・v 更新のセルループ) はリダクションを
@@ -529,6 +695,131 @@ elif grep -qi "delay_s" "$WORK/super_badd/stderr.log" && \
 else
 	say_ng "fdtd bad delay_s exit" " (no reason in stderr)"
 fi
+
+echo "--- (s) source directivity (.ofdx acoustic.feeds[].directivity / aim, ADR-0014)"
+# D = a + (1-a) cos(theta) を「a 倍の単極 + 力の双極子」で実現する。期待値は
+# 点モノポール + 点力双極子の自由音場の閉形式 (双極子の近接場項 1/(ikr) を
+# 含む)。導出・配置・許容 (最大差 0.01) の根拠は directivity.ofd の先頭コメント。
+# fd_dirpat <case dir> <a> <ux> <uy> <uz> : 6 受音点の |X(f)| r を #1 で
+#   正規化した実測と、閉形式 |F_i|/|F_1| の最大差を出す
+fd_dirpat() {
+	for _k in 1 2 3 4 5 6; do
+		if [ "$_k" = 1 ]; then dump "$1/rir.wav"; else dump "$1/rir_$_k.wav"; fi > "$1/p$_k.txt"
+	done
+	_t0=$(sed -n 's/.*"t0_s": \([0-9.eE+-]*\).*/\1/p' "$1/metadata.json")
+	_sg=$(sed -n 's/.*"sigma_s": \([0-9.eE+-]*\).*/\1/p' "$1/metadata.json")
+	_fs=$(sed -n 's/.*"sample_rate": \([0-9]*\).*/\1/p' "$1/metadata.json")
+	paste "$1/p1.txt" "$1/p2.txt" "$1/p3.txt" "$1/p4.txt" "$1/p5.txt" "$1/p6.txt" |
+	awk -v a="$2" -v ux="$3" -v uy="$4" -v uz="$5" -v t0="$_t0" -v sg="$_sg" \
+	    -v fs="$_fs" -v pi="$PI" '
+		BEGIN {
+			c = 343.0; dx = 5.0; f = c / (40 * dx); w = 2 * pi * f; k = w / c;
+			ul = sqrt(ux * ux + uy * uy + uz * uz);
+			split("20 14 0 -14 -20 0", ox, " "); split("0 14 20 14 0 0", oy, " ");
+			split("0 0 0 0 0 20", oz, " ");
+			for (m = 1; m <= 6; m++) {
+				r[m] = dx * sqrt(ox[m] * ox[m] + oy[m] * oy[m] + oz[m] * oz[m]);
+				cs = dx * (ox[m] * ux + oy[m] * uy + oz[m] * uz) / (ul * r[m]);
+				re = a + (1 - a) * cs; im = -(1 - a) * cs / (k * r[m]);
+				F[m] = sqrt(re * re + im * im);
+			}
+		}
+		{	t = NR / fs;   # 記録 n (1 始まり) は t = n dt
+			for (m = 1; m <= 6; m++) {
+				tc = t0 + r[m] / c;
+				if (t > tc - 4 * sg && t < tc + 4 * sg) {
+					xr[m] += $m * cos(w * t); xi[m] -= $m * sin(w * t)
+				}
+			} }
+		END {
+			ref = sqrt(xr[1] * xr[1] + xi[1] * xi[1]) * r[1]; mx = 0;
+			for (m = 1; m <= 6; m++) {
+				d = sqrt(xr[m] * xr[m] + xi[m] * xi[m]) * r[m] / ref - F[m] / F[1];
+				if (d < 0) d = -d; if (d > mx) mx = d;
+			}
+			printf "%.6f", mx
+		}'
+}
+run_case directivity directivity.ofd directivity.ofdx && {
+	chkabs "fdtd figure8 pattern" "$(fd_dirpat "$WORK/directivity" 0 1 1 1)" 0 0.01 "(max diff)"
+	grep -Fq '"directivity_a": 0, "aim": [0.5773502692, 0.5773502692, 0.5773502692]' \
+		"$WORK/directivity/metadata.json" \
+		&& say_ok "fdtd directivity metadata" || say_ng "fdtd directivity metadata"
+}
+# 変種 : バンド別の配列 [0.5, 0, ...] — 有効帯域 (fmax = 6.86 Hz) 内は 125 Hz
+# だけなので a = 0.5 (カーディオイド) が正しい (不変条件 3b と同じバンド選択)。
+# aim は長さ 2 で与える (向きだけが効く — 正規化を忘れると双極子が 2 倍。
+# 8 の字の本体は #1 正規化で倍率が相殺されるので、この変種が番人)
+rm -rf "$WORK/directivity_band"; mkdir -p "$WORK/directivity_band"
+cp "$SRC/directivity.ofd" "$WORK/directivity_band/"
+sed 's/"directivity": "figure8", "aim": \[1, 1, 1\]/"directivity": [0.5, 0, 0, 0, 0, 0], "aim": [2, 0, 0]/' \
+	"$SRC/directivity.ofdx" > "$WORK/directivity_band/directivity.ofdx"
+if "$SOLVER" "$WORK/directivity_band" > /dev/null 2>&1; then
+	chkabs "fdtd in-band cardioid" "$(fd_dirpat "$WORK/directivity_band" 0.5 1 0 0)" 0 0.01 "(max diff)"
+else
+	say_ng "fdtd in-band cardioid" " (solver failed)"
+fi
+# 無指向の明示 ("omni" と全バンド 1 の配列) は指定なしとビット一致 (後方互換)
+rm -rf "$WORK/super_omni"; mkdir -p "$WORK/super_omni"
+cp "$SRC/super2.ofd" "$WORK/super_omni/"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_omni/super2.ofdx" \
+	'[ { "directivity": "omni" }, { "directivity": [1, 1, 1, 1, 1, 1], "aim": [0, 0, 1] } ]'
+if "$SOLVER" "$WORK/super_omni" > /dev/null 2>&1 && \
+   cmp -s "$WORK/super_omni/rir.wav" "$WORK/super_ab/rir.wav"; then
+	say_ok "fdtd explicit omni" " (rir.wav bit-identical to no directivity)"
+else
+	say_ng "fdtd explicit omni" " (rir.wav differs from no directivity)"
+fi
+# 音源ごとの指向性も線形 : 2 音源 (カーディオイド +x / 8 の字 +z) の同時発火 =
+# それぞれ単独の和 ((h) と同じ判定、音源と指向性の対応づけの番人)
+for v in dab da db; do rm -rf "$WORK/super_$v"; mkdir -p "$WORK/super_$v"; done
+cp "$SRC/super2.ofd" "$WORK/super_dab/"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_dab/super2.ofdx" \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0] }, { "directivity": "figure8", "aim": [0, 0, 1] } ]'
+grep -v "^feed = z 3.15" "$SRC/super2.ofd" > "$WORK/super_da/super2.ofd"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_da/super2.ofdx" \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0] } ]'
+grep -v "^feed = z 0.55" "$SRC/super2.ofd" > "$WORK/super_db/super2.ofd"
+mk_feeds "$SRC/super2.ofdx" "$WORK/super_db/super2.ofdx" \
+	'[ { "directivity": "figure8", "aim": [0, 0, 1] } ]'
+sup_ok=1
+for v in dab da db; do
+	"$SOLVER" "$WORK/super_$v" > /dev/null 2>&1 || sup_ok=0
+done
+if [ "$sup_ok" = "1" ]; then
+	for v in dab da db; do dump "$WORK/super_$v/rir.wav" > "$WORK/super_$v/rir.txt"; done
+	paste "$WORK/super_dab/rir.txt" "$WORK/super_da/rir.txt" "$WORK/super_db/rir.txt" | awk \
+		'{ dd = $1 - ($2 + $3); e2 += dd * dd; r2 += $1 * $1 }
+		END {
+			rel = sqrt(e2 / r2);
+			printf "%-26s L2 rel err=%.3e -> %s (<= 1e-5)\n", "fdtd directional superpos", rel, (rel <= 1e-5) ? "OK" : "NG";
+			exit (rel <= 1e-5) ? 0 : 1
+		}' || status=1
+else
+	say_ng "fdtd directional superpos" " (solver failed)"
+fi
+# 不正な指定は無指向に落とさず非零終了 (数値を捏造しない)
+# dir_refuse <solver> <label> <case> <ofd> <ofdx> <feeds 配列> <stderr に要る語>
+dir_refuse() {
+	_dd="$WORK/$3"; rm -rf "$_dd"; mkdir -p "$_dd"
+	cp "$SRC/$4" "$_dd/"
+	mk_feeds "$SRC/$5" "$_dd/$5" "$6"
+	if "$1" "$_dd" > /dev/null 2> "$_dd/stderr.log"; then
+		say_ng "$2" " (should fail)"
+	elif grep -qi "$7" "$_dd/stderr.log" && [ ! -f "$_dd/rir.wav" ]; then
+		printf "%-26s -> OK (refused with the offending key)\n" "$2"
+	else
+		say_ng "$2" " (no reason in stderr)"
+	fi
+}
+dir_refuse "$SOLVER" "fdtd directivity no aim" super_dnoaim super2.ofd super2.ofdx \
+	'[ { "directivity": "cardioid" } ]' '"aim"'
+dir_refuse "$SOLVER" "fdtd directivity bad name" super_dname super2.ofd super2.ofdx \
+	'[ { "directivity": "shotgun", "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$SOLVER" "fdtd directivity range" super_drange super2.ofd super2.ofdx \
+	'[ { "directivity": [0.5, 1.5], "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$SOLVER" "fdtd directivity aim len" super_daim super2.ofd super2.ofdx \
+	'[ { "directivity": 0.5, "aim": [1, 0] } ]' 'aim'
 
 ###############################################################################
 # ofdx_acoustic_ga (幾何音響、高域担当) の検証
@@ -718,15 +1009,17 @@ ga_run ga_lossless ga_lossless.ofd ga_lossless.ofdx && {
 		}' "$d/rir.txt" || status=1
 }
 
-echo "--- (G) occlusion by rigid obstacles + honest warnings"
+echo "--- (G) occlusion by rigid obstacles + honest logs"
 ga_run ga_pillar ga_pillar.ofd ga_pillar.ofdx && {
 	d="$WORK/ga_pillar"
 	grep -q "normal end" "$d/solver.log" && say_ok "ga_pillar normal end" \
 		|| say_ng "ga_pillar normal end"
 	grep -q "warning: 2 feeds" "$d/solver.log" && say_ok "ga multi-feed warning" \
 		|| say_ng "ga multi-feed warning"
-	grep -q "AABB" "$d/solver.log" && say_ok "ga AABB approx warning" \
-		|| say_ng "ga AABB approx warning"
+	# 円柱 (shape 11) は形状どおりの曲面として扱われる (AABB 近似ではない)
+	grep -q "geometry #2 shape 11: exact curved solid" "$d/solver.log" \
+		&& say_ok "ga exact curved-solid note" \
+		|| say_ng "ga exact curved-solid note"
 	# 受音点 #1 は衝立で直接音が遮られ、#2 は遮られない (導出は ga_pillar.ofd)
 	dump "$d/rir.wav" > "$d/blocked.txt"
 	dump "$d/rir_clear.wav" > "$d/clear.txt"
@@ -854,6 +1147,29 @@ if "$GA_SOLVER" "$WORK/ga_panel_mat" > /dev/null 2>&1; then
 		"$(awk -v r="$r0" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
 else
 	say_ng "ga obstacle material run" " (solver failed)"
+fi
+# 同じ材質を acoustic 直下 (FDTD と共有するキー) に書いても同じ板になる。
+# 両方に書けば幾何音響専用の acoustic.ga.obstacles が勝つ (既存入力の互換)。
+rm -rf "$WORK/ga_panel_top"; mkdir -p "$WORK/ga_panel_top"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_top/"
+sed 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ],/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_top/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_top" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_top/rir.wav"; then
+	say_ok "ga obstacle top-level key" " (acoustic 直下でもビット一致)"
+else
+	say_ng "ga obstacle top-level key"
+fi
+rm -rf "$WORK/ga_panel_both"; mkdir -p "$WORK/ga_panel_both"
+cp "$SRC/ga_panel.ofd" "$WORK/ga_panel_both/"
+sed -e 's/"acoustic": {/"acoustic": { "obstacles": [ { "geometry": 1, "alpha": [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] } ],/' \
+    -e 's/"scattering": 0.0/"scattering": 0.0, "obstacles": [ { "geometry": 1, "alpha": [0.36, 0.36, 0.36, 0.36, 0.36, 0.36] } ]/' \
+	"$SRC/ga_panel.ofdx" > "$WORK/ga_panel_both/ga_panel.ofdx"
+if "$GA_SOLVER" "$WORK/ga_panel_both" > /dev/null 2>&1 &&
+   cmp -s "$WORK/ga_panel_mat/rir.wav" "$WORK/ga_panel_both/rir.wav"; then
+	say_ok "ga obstacle ga-level wins" " (acoustic.ga.obstacles が優先)"
+else
+	say_ng "ga obstacle ga-level wins"
 fi
 # 板の散乱係数 = 1 (alpha 省略 = 剛体のまま) -> 板の鏡面像が拡散に回って
 # 消える (受音点 #1 の image_sources が 2 -> 1。#2 はもともと 1)。
@@ -1108,6 +1424,328 @@ elif grep -qi "scattering" "$WORK/ga_bscat_bad/stderr.log" && \
 	printf "%-26s -> OK (refused with the offending key)\n" "ga band-scat bad value"
 else
 	say_ng "ga band-scat bad value" " (no reason in stderr)"
+fi
+
+echo "--- (M) source directivity (.ofdx acoustic.feeds[].directivity / aim, ADR-0014)"
+# D_b = a_b + (1-a_b) cos(theta) をバンド別に。直接音・鏡像は振幅に D_b、
+# レイはエネルギーに D_b^2。導出・配置・許容の根拠は ga_directivity.ofd の
+# 先頭コメント。バンド中心の DFT から遅延の位相を戻した実部 x 4 pi r が
+# 符号つきの D_b(theta) になる。
+ga_run ga_directivity ga_directivity.ofd ga_directivity.ofdx && {
+	d="$WORK/ga_directivity"
+	for v in on_axis side rear top deg45 deg135; do dump "$d/rir_$v.wav" > "$d/$v.txt"; done
+	ga_dirpat() {   # ga_dirpat <f> <a> <ratio(0|1)> : 6 受音点の最大差
+		paste "$d/on_axis.txt" "$d/side.txt" "$d/rear.txt" "$d/top.txt" \
+		      "$d/deg45.txt" "$d/deg135.txt" |
+		awk -v f0="$1" -v a="$2" -v rt="$3" -v pi="$PI" '
+			BEGIN {
+				split("7 7 -7 0 10 -10", ox, " "); split("7 -7 -7 0 0 0", oy, " ");
+				split("0 0 0 10 0 0", oz, " "); w = 2 * pi * f0 / 48000;
+				for (m = 1; m <= 6; m++) {
+					r[m] = sqrt(ox[m] * ox[m] + oy[m] * oy[m] + oz[m] * oz[m]);
+					E[m] = a + (1 - a) * (ox[m] + oy[m]) / (sqrt(2) * r[m]);
+				}
+			}
+			{ n = NR - 1; for (m = 1; m <= 6; m++) {
+				xr[m] += $m * cos(w * n); xi[m] -= $m * sin(w * n) } }
+			END {
+				for (m = 1; m <= 6; m++) {
+					ph = 2 * pi * f0 * r[m] / 343.0;
+					D[m] = (xr[m] * cos(ph) - xi[m] * sin(ph)) * 4 * pi * r[m];
+				}
+				for (m = 1; m <= 6; m++) {
+					v = rt ? D[m] / D[1] : D[m];
+					dd = v - E[m]; if (dd < 0) dd = -dd; if (dd > mx) mx = dd;
+				}
+				printf "%.6f", mx
+			}'
+	}
+	chkabs "ga dir 125 Hz omni"       "$(ga_dirpat 125 1 0)"    0 0.01 "(max diff)"
+	chkabs "ga dir 1 kHz cardioid"    "$(ga_dirpat 1000 0.5 0)" 0 0.01 "(max diff)"
+	chkabs "ga dir 4 kHz figure8"     "$(ga_dirpat 4000 0 0)"   0 0.01 "(max diff)"
+	chkabs "ga dir 8 kHz extrapolate" "$(ga_dirpat 8000 0 1)"   0 0.01 "(max diff)"
+	grep -Fq '"directivity": [1, 1, 0.5, 0.5, 0, 0, 0], "aim": [0.7071067812, 0.7071067812, 0]' \
+		"$d/metadata.json" \
+		&& say_ok "ga directivity metadata" || say_ng "ga directivity metadata"
+}
+# 残響エネルギー : 無損失室の後期窓 [0.3, 0.9) s の平均自乗圧は総放射パワー
+# (D^2 の球面平均 a^2 + (1-a)^2/3) に比例 — 無指向 (E) との比
+# カーディオイド 1/3、ハイパーカーディオイド (斜め向き) 1/4、±3%
+for v in card:cardioid:0,0,1:0.3333333333 hyper:hypercardioid:1,2,3:0.25; do
+	nm=${v%%:*}; rest=${v#*:}; pat=${rest%%:*}; rest=${rest#*:}
+	aim=${rest%%:*}; ex=${rest#*:}
+	dd="$WORK/ga_lossless_$nm"; rm -rf "$dd"; mkdir -p "$dd"
+	cp "$SRC/ga_lossless.ofd" "$dd/"
+	sed "s/\"acoustic\": {/\"acoustic\": { \"feeds\": [ { \"directivity\": \"$pat\", \"aim\": [$aim] } ],/" \
+		"$SRC/ga_lossless.ofdx" > "$dd/ga_lossless.ofdx"
+	if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+		dump "$dd/rir.wav" > "$dd/rir.txt"
+		chk "ga $pat power" "$(paste "$dd/rir.txt" "$WORK/ga_lossless/rir.txt" | awk '
+			{ t = (NR - 1) / 48000;
+			  if (t >= 0.30 && t < 0.90) { e1 += $1 * $1; e0 += $2 * $2 } }
+			END { printf "%.10f", e1 / e0 }')" "$ex" 0.03
+	else
+		say_ng "ga $pat power" " (solver failed)"
+	fi
+done
+# レイ側の音源ごとの対応づけ : ga_lossless に 2 個目の音源 (6.5, 1.5, 4.0) を
+# 足し、無指向 + カーディオイドで同時発火。後期のエネルギーは音源ごとの
+# 総パワーの和なので、単一無指向 (E) との比は 1 + 1/3 = 4/3 (無損失室の
+# 後期エネルギー密度は音源位置によらない — 2 個目の位置差は統計の 1% 程度)
+dd="$WORK/ga_lossless_two"; rm -rf "$dd"; mkdir -p "$dd"
+sed 's/^feed = z 2.0 2.0 2.0 1.0 0.0 50.0/&\
+feed = z 6.5 1.5 4.0 1.0 0.0 50.0/' "$SRC/ga_lossless.ofd" > "$dd/ga_lossless.ofd"
+sed 's/"acoustic": {/"acoustic": { "multi_source": true, "feeds": [ { "directivity": "omni" }, { "directivity": "cardioid", "aim": [0, 1, 0] } ],/' \
+	"$SRC/ga_lossless.ofdx" > "$dd/ga_lossless.ofdx"
+if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+	dump "$dd/rir.wav" > "$dd/rir.txt"
+	chk "ga two-src ray power" "$(paste "$dd/rir.txt" "$WORK/ga_lossless/rir.txt" | awk '
+		{ t = (NR - 1) / 48000;
+		  if (t >= 0.30 && t < 0.90) { e1 += $1 * $1; e0 += $2 * $2 } }
+		END { printf "%.10f", e1 / e0 }')" 1.3333333333 0.03
+else
+	say_ng "ga two-src ray power" " (solver failed)"
+fi
+# 音源ごとの対応づけ : ga_two の 2 音源に 8 の字 (aim -x、受音点は真後ろ =
+# 極性反転 -1) とハイパーカーディオイド (aim +y、受音点は真横 = a = 1/4) —
+# 閉形式は #1 : -1/(4 pi 10)、#2 : 0.25/(4 pi 20) (全バンド同じ a なので
+# 標本和で読める。取り違えると #1 が 0.25、#2 が 1 になる)
+rm -rf "$WORK/ga_two_dir"; mkdir -p "$WORK/ga_two_dir"
+cp "$SRC/ga_two.ofd" "$WORK/ga_two_dir/"
+mk_feeds "$SRC/ga_two.ofdx" "$WORK/ga_two_dir/ga_two.ofdx" \
+	'[ { "directivity": "figure8", "aim": [-1, 0, 0] }, { "directivity": "hypercardioid", "aim": [0, 1, 0] } ]'
+if "$GA_SOLVER" "$WORK/ga_two_dir" > /dev/null 2>&1; then
+	dump "$WORK/ga_two_dir/rir.wav" > "$WORK/ga_two_dir/rir.txt"
+	t1=$(awk 'BEGIN{printf "%.10f", 10.0/343.0}')
+	t2=$(awk 'BEGIN{printf "%.10f", 20.0/343.0}')
+	chk "ga dir #1 figure8 rear" "$(ga_sum "$WORK/ga_two_dir/rir.txt" "$t1" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", -1/(4*pi*10.0)}')" 0.01
+	chk "ga dir #2 hyper side" "$(ga_sum "$WORK/ga_two_dir/rir.txt" "$t2" 0.001)" \
+		"$(awk -v pi="$PI" 'BEGIN{printf "%.10e", 0.25/(4*pi*20.0)}')" 0.01
+else
+	say_ng "ga dir two-source" " (solver failed)"
+fi
+# 無指向の明示は指定なしとビット一致 (後方互換)
+rm -rf "$WORK/ga_omni"; mkdir -p "$WORK/ga_omni"
+cp "$SRC/ga_two.ofd" "$WORK/ga_omni/"
+mk_feeds "$SRC/ga_two.ofdx" "$WORK/ga_omni/ga_two.ofdx" \
+	'[ { "directivity": "omni" }, { "directivity": [1, 1, 1, 1, 1, 1], "aim": [0, 0, 1] } ]'
+if "$GA_SOLVER" "$WORK/ga_omni" > /dev/null 2>&1 && \
+   cmp -s "$WORK/ga_omni/rir.wav" "$WORK/ga_two/rir.wav"; then
+	say_ok "ga explicit omni" " (rir.wav bit-identical to no directivity)"
+else
+	say_ng "ga explicit omni" " (rir.wav differs from no directivity)"
+fi
+dir_refuse "$GA_SOLVER" "ga directivity no aim" ga_dnoaim ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": [1, 1, 1, 1, 1, 0] } ]' '"aim"'
+dir_refuse "$GA_SOLVER" "ga directivity bad name" ga_dname ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": "shotgun", "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$GA_SOLVER" "ga directivity range" ga_drange ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": -0.25, "aim": [1, 0, 0] } ]' 'directivity'
+dir_refuse "$GA_SOLVER" "ga directivity aim len" ga_daim ga_two.ofd ga_two.ofdx \
+	'[ { "directivity": "cardioid", "aim": [1, 0, 0, 1] } ]' 'aim'
+
+echo "--- (N) exact obstacle shapes (curved / slanted / volume-and-surface)"
+# 障害物は全 shape を形状どおりに扱う (ga_shape.c — FDTD の geom_inside と
+# 同じ内外規則)。導出と許容の根拠は ga_convex.ofd / ga_planar.ofd /
+# ga_mfp.ofd の先頭コメント。
+# (N1) 凸面鏡 : 剛体球の反射エネルギー 1/(4 pi (s + r + 2 s r/a))^2、±5%
+ga_run ga_convex ga_convex.ofd ga_convex.ofdx && {
+	d="$WORK/ga_convex"
+	dump "$d/rir.wav" > "$d/axis.txt"
+	chk "ga convex mirror energy" \
+		"$(awk -v tc="$(awk 'BEGIN{printf "%.10f", 9.0/343.0}')" '
+			{ t = (NR - 1) / 48000; if (t > tc - 0.008 && t < tc + 0.008) e += $1 * $1 }
+			END { printf "%.10e", e }' "$d/axis.txt")" \
+		"$(awk -v pi="$PI" 'BEGIN{ L = 6 + 3 + 2*6*3/10.0; printf "%.10e", (1/(4*pi*L))^2 }')" 0.05
+	grep -q "exact curved solid" "$d/solver.log" \
+		&& say_ok "ga curved-solid log" || say_ng "ga curved-solid log"
+}
+# (N1b) 円錐台の側面 = 非点収差の凸面鏡 (主曲率半径 inf と rho = r/cos beta)
+rm -rf "$WORK/ga_cone_mirror"; mkdir -p "$WORK/ga_cone_mirror"
+sed -e 's/^geometry = .*/geometry = 2 53 0.0 20.0 30.0 30.0 20.0 20.0 4.0 4.0/' \
+    -e "s/^feed = .*/feed = z $(awk 'BEGIN{b=atan2(0.4,1); printf "%.6f 30.0 %.6f", 36+8*cos(b), 10+8*sin(b)}') 1.0 0.0 50.0/" \
+    -e "s/^point = z 43.0 30.0 30.0 # axis/point = z $(awk 'BEGIN{b=atan2(0.4,1); printf "%.6f 30.0 %.6f", 36+4*cos(b), 10+4*sin(b)}') # axis/" \
+    -e '/# corner$/d' -e '/# behind$/d' \
+	"$SRC/ga_convex.ofd" > "$WORK/ga_cone_mirror/ga_convex.ofd"
+cp "$SRC/ga_convex.ofdx" "$WORK/ga_cone_mirror/"
+if "$GA_SOLVER" "$WORK/ga_cone_mirror" > /dev/null 2>&1; then
+	d="$WORK/ga_cone_mirror"
+	dump "$d/rir.wav" > "$d/axis.txt"
+	chk "ga cone mirror energy" \
+		"$(awk -v tc="$(awk 'BEGIN{printf "%.10f", 12.0/343.0}')" '
+			{ t = (NR - 1) / 48000; if (t > tc - 0.008 && t < tc + 0.008) e += $1 * $1 }
+			END { printf "%.10e", e }' "$d/axis.txt")" \
+		"$(awk -v pi="$PI" 'BEGIN{ b = atan2(0.4, 1); rho = 6/cos(b); s = 8; r = 4;
+			printf "%.10e", (1/(4*pi))^2 / ((s + r)*(s + r + 2*s*r/rho)) }')" 0.05
+else
+	say_ng "ga cone mirror energy" " (solver failed)"
+fi
+# (N2) 遮蔽 : 球を alpha = 1 にした変種 (反射を消して直接音だけを見る)
+rm -rf "$WORK/ga_convex_occ"; mkdir -p "$WORK/ga_convex_occ"
+cp "$SRC/ga_convex.ofd" "$WORK/ga_convex_occ/"
+sed 's/"geometry": 1, "alpha": \[0, 0, 0, 0, 0, 0\]/"geometry": 1, "alpha": [1, 1, 1, 1, 1, 1]/' \
+	"$SRC/ga_convex.ofdx" > "$WORK/ga_convex_occ/ga_convex.ofdx"
+if "$GA_SOLVER" "$WORK/ga_convex_occ" > /dev/null 2>&1; then
+	d="$WORK/ga_convex_occ"
+	dump "$d/rir_corner.wav" > "$d/corner.txt"
+	dump "$d/rir_behind.wav" > "$d/behind.txt"
+	rc=$(awk 'BEGIN{printf "%.10f", sqrt(16*16*2)}')
+	chk "ga exact occlusion (miss)" \
+		"$(ga_sum "$d/corner.txt" "$(awk -v r="$rc" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$rc" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+	awk -v a="$(ga_sum "$d/behind.txt" "$(awk 'BEGIN{printf "%.10f", 32.0/343.0}')" 0.001)" \
+	    -v pi="$PI" 'BEGIN { ref = 1/(4*pi*32.0); r = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/free-field=%.4f -> %s (< 0.05)\n", "ga exact occlusion (hit)", r, (r < 0.05) ? "OK" : "NG";
+		exit (r < 0.05) ? 0 : 1 }' || status=1
+else
+	say_ng "ga exact occlusion (miss)" " (solver failed)"
+fi
+# (N3) 斜めの平面 : 三角柱の斜辺の面での鏡面反射 = 平面への鏡像の閉形式
+# ga_mirror <sx sy sz> <rx ry rz> <nx ny nz> <d> : |R - S'| (S' = S - 2 ((S.n) - d) n、n は正規化)
+ga_mirror() {
+	awk -v s="$1" -v r="$2" -v n="$3" -v dd="$4" 'BEGIN {
+		split(s, S, " "); split(r, R, " "); split(n, N, " ");
+		l = sqrt(N[1]^2 + N[2]^2 + N[3]^2); h = (S[1]*N[1] + S[2]*N[2] + S[3]*N[3] - dd) / l;
+		for (i = 1; i <= 3; i++) { Sp = S[i] - 2 * h * N[i] / l; q += (R[i] - Sp)^2 }
+		printf "%.10f", sqrt(q) }'
+}
+ga_run ga_planar ga_planar.ofd ga_planar.ofdx && {
+	d="$WORK/ga_planar"
+	dump "$d/rir.wav" > "$d/front.txt"
+	dump "$d/rir_beyond.wav" > "$d/beyond.txt"
+	r1=$(ga_mirror "20 20 15" "25 15 15" "1 1 0" 30)
+	t1=$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')
+	chk "ga prism face reflection" "$(ga_sum "$d/front.txt" "$t1" 0.001)" \
+		"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+	chk "ga prism face arrival [s]" "$(ga_peak "$d/front.txt" "$t1" 0.001)" "$t1" 0.01
+	r2=$(ga_mirror "20 20 15" "35 5 15" "1 1 0" 30)
+	awk -v a="$(ga_sum "$d/beyond.txt" "$(awk -v r="$r2" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+	    -v r="$r2" -v pi="$PI" 'BEGIN { ref = 1/(4*pi*r); q = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/would-be=%.4f -> %s (< 0.05, 反射点が面の外)\n", "ga prism off-face rejected", q, (q < 0.05) ? "OK" : "NG";
+		exit (q < 0.05) ? 0 : 1 }' || status=1
+}
+# 斜めの面の入射角 : 同じ三角柱を alpha = 0.5 + 角度依存吸音にすると、
+# 反射は R(theta) = (zeta cos - 1)/(zeta cos + 1) 倍 (zeta は Paris の逆解)。
+# cos = |(R - S').n| / r1 = 20/(sqrt(2) sqrt(250)) = 0.8944 — 一般の平面では
+# 鏡映で方向が回るので、入射角を実経路から求めていることの番人
+# (垂直入射 cos = 1 として扱う誤実装は -5% ずれる)。
+rm -rf "$WORK/ga_planar_ad"; mkdir -p "$WORK/ga_planar_ad"
+cp "$SRC/ga_planar.ofd" "$WORK/ga_planar_ad/"
+sed -e 's/"obstacles": \[ { "geometry": 1, "alpha": \[0, 0, 0, 0, 0, 0\]/"angle_dependent_absorption": true, "obstacles": [ { "geometry": 1, "alpha": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]/' \
+	"$SRC/ga_planar.ofdx" > "$WORK/ga_planar_ad/ga_planar.ofdx"
+if "$GA_SOLVER" "$WORK/ga_planar_ad" > /dev/null 2>&1; then
+	d="$WORK/ga_planar_ad"
+	dump "$d/rir.wav" > "$d/front.txt"
+	r1=$(ga_mirror "20 20 15" "25 15 15" "1 1 0" 30)
+	zt=$(paris_zeta 0.5)
+	chk "ga slanted face R(theta)" \
+		"$(ga_sum "$d/front.txt" "$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$r1" -v z="$zt" -v pi="$PI" 'BEGIN{
+			c = 20/(sqrt(2)*r); R = (z*c - 1)/(z*c + 1); printf "%.10e", R/(4*pi*r) }')" 0.01
+else
+	say_ng "ga slanted face R(theta)" " (solver failed)"
+fi
+rm -rf "$WORK/ga_frustum"; mkdir -p "$WORK/ga_frustum"
+sed -e 's/^geometry = .*/geometry = 2 43 0.0 10.0 20.0 20.0 20.0 20.0 4.0 20.0/' \
+    -e 's/^feed = .*/feed = z 32.0 20.0 8.0 1.0 0.0 50.0/' \
+    -e '/^point = z 35.0/d' \
+    -e 's/^point = z 25.0 15.0 15.0 # front/point = z 36.0 20.0 4.0 # front/' \
+	"$SRC/ga_planar.ofd" > "$WORK/ga_frustum/ga_planar.ofd"
+cp "$SRC/ga_planar.ofdx" "$WORK/ga_frustum/"
+if "$GA_SOLVER" "$WORK/ga_frustum" > /dev/null 2>&1; then
+	d="$WORK/ga_frustum"
+	dump "$d/rir.wav" > "$d/front.txt"
+	r1=$(ga_mirror "32 20 8" "36 20 4" "1 0 0.8" 30)
+	chk "ga frustum face reflection" \
+		"$(ga_sum "$d/front.txt" "$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+else
+	say_ng "ga frustum face reflection" " (solver failed)"
+fi
+# (N4) 平均自由行程 4V/S (Kosten) : 障害物の体積と表面積が形状どおり、±2%
+# ga_vs <名前> : "V S" (解析的。楕円の円錐台の側面積だけ数値積分)
+ga_vs() {
+	awk -v k="$1" -v pi="$PI" 'BEGIN {
+		V = 0; S = 0;
+		if (k == "sphere")   { V = 4/3*pi*27; S = 4*pi*9 }
+		if (k == "cylinder") { V = pi*9*6; S = 2*pi*3*6 + 2*pi*9 }
+		if (k == "cone")     { h = 6; r0 = 3; r1 = 1;
+		                       V = pi*h/3*(r0^2 + r0*r1 + r1^2);
+		                       S = pi*(r0 + r1)*sqrt(h^2 + (r0 - r1)^2) + pi*(r0^2 + r1^2) }
+		if (k == "ellcone")  { L = 6; A0 = 3; a = -2.5; B0 = 1; b = 1.5;
+		                       V = pi*L*(A0*B0 + (A0*b + B0*a)/2 + a*b/3);
+		                       nt = 360; ns = 120; lat = 0;
+		                       for (i = 0; i < nt; i++) { th = (i + 0.5)*2*pi/nt; c = cos(th); s = sin(th);
+		                         for (j = 0; j < ns; j++) { u = (j + 0.5)/ns; A = A0 + a*u; B = B0 + b*u;
+		                           # X(th,u) = (u L, A cos th, B sin th) : |X_th x X_u|
+		                           x1 = 0; y1 = -A*s; z1 = B*c; x2 = L; y2 = a*c; z2 = b*s;
+		                           cx = y1*z2 - z1*y2; cy = z1*x2 - x1*z2; cz = x1*y2 - y1*x2;
+		                           lat += sqrt(cx*cx + cy*cy + cz*cz) } }
+		                       S = lat*(2*pi/nt)*(1.0/ns) + pi*A0*B0 + pi*(A0 + a)*(B0 + b) }
+		if (k == "pyramid")  { h = 6; a0 = 6; a1 = 2; b0 = 4; b1 = 6;
+		                       V = h*(a0*b0 + (a0*(b1 - b0) + b0*(a1 - a0))/2 + (a1 - a0)*(b1 - b0)/3);
+		                       # (awk は改行で文が切れるので 1 項ずつ足す)
+		                       S = 2*(b0 + b1)/2*sqrt(h^2 + ((a0 - a1)/2)^2);
+		                       S += 2*(a0 + a1)/2*sqrt(h^2 + ((b0 - b1)/2)^2);
+		                       S += a0*b0 + a1*b1 }
+		if (k == "prism")    { V = 18*6; S = 2*18 + (6 + 6 + sqrt(72))*6 }
+		if (k == "box")      { V = 6*6*3; S = 2*(36 + 18 + 18) }
+		printf "%.10f %.10f", V, S }'
+}
+for v in "sphere:geometry = 2 2 2.0 8.0 2.0 8.0 2.0 8.0" \
+         "cylinder:geometry = 2 12 2.0 8.0 2.0 8.0 2.0 8.0" \
+         "cone:geometry = 2 53 2.0 8.0 5.0 5.0 6.0 6.0 2.0 2.0" \
+         "ellcone:geometry = 2 51 2.0 8.0 5.0 5.0 6.0 2.0 1.0 5.0" \
+         "pyramid:geometry = 2 42 2.0 8.0 5.0 5.0 6.0 4.0 2.0 6.0" \
+         "prism:geometry = 2 33 2.0 8.0 2.0 8.0 2.0 2.0 2.0 8.0" \
+         "box:geometry = 2 1 2.0 8.0 2.0 8.0 3.5 6.5" \
+         "empty:"; do
+	nm=${v%%:*}; gl=${v#*:}
+	dd="$WORK/ga_mfp_$nm"; rm -rf "$dd"; mkdir -p "$dd"
+	if [ -n "$gl" ]; then
+		sed "s/^geometry = .*/$gl/" "$SRC/ga_mfp.ofd" > "$dd/ga_mfp.ofd"
+	else
+		grep -v "^geometry" "$SRC/ga_mfp.ofd" > "$dd/ga_mfp.ofd"
+	fi
+	cp "$SRC/ga_mfp.ofdx" "$dd/"
+	if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+		vs=$(ga_vs "$nm")
+		chk "ga mfp 4V/S $nm" \
+			"$(sed -n 's/.*ray tracing: \([0-9]*\) rays, \([0-9]*\) reflections.*/\1 \2/p' "$dd/solver.log" |
+			   awk '{ printf "%.10f", $1 * 343.0 * 1.0 / ($2 - $1) }')" \
+			"$(echo "$vs" | awk '{ printf "%.10f", 4 * (1000 - $1) / (600 + $2) }')" 0.02
+	else
+		say_ng "ga mfp 4V/S $nm" " (solver failed)"
+	fi
+done
+# (N5) 全 shape の受理と拒否 : FDTD の (v) と同じ voxel_shapes。外接箱の隅
+# (形状の外) の受音点 4 点を受理し、形状の中の受音点は形状を名指しして
+# 非零終了する (内外は FDTD と同じ規則)。metadata の形状モデル (楕円体・
+# 楕円柱・円錐台 7 個が curved、三角柱・角錐台 6 個が polyhedron)。
+rm -rf "$WORK/ga_voxel"; mkdir -p "$WORK/ga_voxel"
+cp "$SRC/voxel_shapes.ofd" "$SRC/voxel_shapes.ofdx" "$WORK/ga_voxel/"
+if "$GA_SOLVER" "$WORK/ga_voxel" > /dev/null 2> "$WORK/ga_voxel/stderr.log"; then
+	say_ok "ga AABB-only points" " (外接箱の隅の受音点 4 点を受理)"
+	if [ "$(grep -c '"model": "curved"' "$WORK/ga_voxel/metadata.json")" = 7 ] &&
+	   [ "$(grep -c '"model": "polyhedron"' "$WORK/ga_voxel/metadata.json")" = 6 ]; then
+		say_ok "ga geometry_models"
+	else
+		say_ng "ga geometry_models" " (expected 7 curved + 6 polyhedron)"
+	fi
+else
+	say_ng "ga AABB-only points" " ($(head -1 "$WORK/ga_voxel/stderr.log"))"
+fi
+rm -rf "$WORK/ga_voxel_in"; mkdir -p "$WORK/ga_voxel_in"
+sed 's/^point = z 0.125 0.175 0.125$/point = z 0.425 0.425 0.375/' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/ga_voxel_in/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/ga_voxel_in/"
+if "$GA_SOLVER" "$WORK/ga_voxel_in" > /dev/null 2> "$WORK/ga_voxel_in/stderr.log"; then
+	say_ng "ga inside-point exit" " (accepted a point inside the ellipsoid)"
+elif grep -q "inside rigid geometry #1 (shape 2)" "$WORK/ga_voxel_in/stderr.log"; then
+	say_ok "ga inside-point exit" " (refused, names geometry #1)"
+else
+	say_ng "ga inside-point exit" " (no reason on stderr)"
 fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
