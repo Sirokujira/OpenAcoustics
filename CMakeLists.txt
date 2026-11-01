@@ -76,6 +76,7 @@ add_executable(ofdx_acoustic_ga
     src/ga_ofdx.c
     src/ga_setup.c
     src/ga_trace.c
+    src/ga_shape.c
     src/ga_synth.c
     src/ga_json.c
     src/wav.c

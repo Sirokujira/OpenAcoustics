@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "acoustic": {
+    "absorption": [
+      { "enabled": true, "role": 1, "name": "Ceiling",  "alpha": [0, 0, 0, 0, 0, 0] },
+      { "enabled": true, "role": 2, "name": "SideWall", "alpha": [0, 0, 0, 0, 0, 0] },
+      { "enabled": true, "role": 3, "name": "RearWall", "alpha": [0, 0, 0, 0, 0, 0] },
+      { "enabled": true, "role": 4, "name": "Floor",    "alpha": [0, 0, 0, 0, 0, 0] }
+    ],
+    "ga": {
+      "image_order": 1,
+      "rays": 10000,
+      "scattering": 1.0,
+      "air_absorption": false,
+      "duration_s": 1.0
+    }
+  }
+}

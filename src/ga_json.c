@@ -196,6 +196,27 @@ int ga_write_metadata(ga_t *g)
 	fprintf(fp, "  \"angle_dependent_absorption\": %s,\n",
 	        g->angle_dep ? "true" : "false");
 	fprintf(fp, "  \"reflecting_surfaces\": %d,\n", g->nsurf);
+	/* 障害物の形状モデル (追加キー) : 全 shape を形状どおりに扱う
+	 * (ga_shape.c)。box = 軸平行の 6 面、polyhedron = 平面の凸多面体
+	 * (image_faces 枚が鏡像法の面集合に入る)、curved = 曲面 (鏡像法に
+	 * 入らず、反射は光線追跡が受け持つ)。無視した形状は "ignored"。 */
+	fprintf(fp, "  \"geometry_models\": [");
+	{
+		int n, f, ni;
+		for (n = 0; n < g->ngeom; n++) {
+			const ga_geom_t *o = &g->geom[n];
+			const char *m = !o->ok ? "ignored"
+			              : (o->kind == GA_SOLID_BOX) ? "box"
+			              : (o->kind == GA_SOLID_POLY) ? "polyhedron" : "curved";
+			ni = 0;
+			if (o->ok && o->kind == GA_SOLID_BOX) ni = 6;
+			if (o->ok && o->kind == GA_SOLID_POLY)
+				for (f = 0; f < o->nface; f++) if (o->fnv[f] > 0) ni++;
+			fprintf(fp, "%s\n    { \"geometry\": %d, \"shape\": %d, \"model\": \"%s\", "
+			        "\"image_faces\": %d }", n ? "," : "", n + 1, o->shape, m, ni);
+		}
+		fprintf(fp, "%s],\n", g->ngeom ? "\n  " : "");
+	}
 	fprintf(fp, "  \"obstacle_materials\": [");
 	{
 		int first = 1, n;

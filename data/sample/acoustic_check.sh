@@ -1009,15 +1009,17 @@ ga_run ga_lossless ga_lossless.ofd ga_lossless.ofdx && {
 		}' "$d/rir.txt" || status=1
 }
 
-echo "--- (G) occlusion by rigid obstacles + honest warnings"
+echo "--- (G) occlusion by rigid obstacles + honest logs"
 ga_run ga_pillar ga_pillar.ofd ga_pillar.ofdx && {
 	d="$WORK/ga_pillar"
 	grep -q "normal end" "$d/solver.log" && say_ok "ga_pillar normal end" \
 		|| say_ng "ga_pillar normal end"
 	grep -q "warning: 2 feeds" "$d/solver.log" && say_ok "ga multi-feed warning" \
 		|| say_ng "ga multi-feed warning"
-	grep -q "AABB" "$d/solver.log" && say_ok "ga AABB approx warning" \
-		|| say_ng "ga AABB approx warning"
+	# 円柱 (shape 11) は形状どおりの曲面として扱われる (AABB 近似ではない)
+	grep -q "geometry #2 shape 11: exact curved solid" "$d/solver.log" \
+		&& say_ok "ga exact curved-solid note" \
+		|| say_ng "ga exact curved-solid note"
 	# 受音点 #1 は衝立で直接音が遮られ、#2 は遮られない (導出は ga_pillar.ofd)
 	dump "$d/rir.wav" > "$d/blocked.txt"
 	dump "$d/rir_clear.wav" > "$d/clear.txt"
@@ -1542,6 +1544,209 @@ dir_refuse "$GA_SOLVER" "ga directivity range" ga_drange ga_two.ofd ga_two.ofdx 
 	'[ { "directivity": -0.25, "aim": [1, 0, 0] } ]' 'directivity'
 dir_refuse "$GA_SOLVER" "ga directivity aim len" ga_daim ga_two.ofd ga_two.ofdx \
 	'[ { "directivity": "cardioid", "aim": [1, 0, 0, 1] } ]' 'aim'
+
+echo "--- (N) exact obstacle shapes (curved / slanted / volume-and-surface)"
+# 障害物は全 shape を形状どおりに扱う (ga_shape.c — FDTD の geom_inside と
+# 同じ内外規則)。導出と許容の根拠は ga_convex.ofd / ga_planar.ofd /
+# ga_mfp.ofd の先頭コメント。
+# (N1) 凸面鏡 : 剛体球の反射エネルギー 1/(4 pi (s + r + 2 s r/a))^2、±5%
+ga_run ga_convex ga_convex.ofd ga_convex.ofdx && {
+	d="$WORK/ga_convex"
+	dump "$d/rir.wav" > "$d/axis.txt"
+	chk "ga convex mirror energy" \
+		"$(awk -v tc="$(awk 'BEGIN{printf "%.10f", 9.0/343.0}')" '
+			{ t = (NR - 1) / 48000; if (t > tc - 0.008 && t < tc + 0.008) e += $1 * $1 }
+			END { printf "%.10e", e }' "$d/axis.txt")" \
+		"$(awk -v pi="$PI" 'BEGIN{ L = 6 + 3 + 2*6*3/10.0; printf "%.10e", (1/(4*pi*L))^2 }')" 0.05
+	grep -q "exact curved solid" "$d/solver.log" \
+		&& say_ok "ga curved-solid log" || say_ng "ga curved-solid log"
+}
+# (N1b) 円錐台の側面 = 非点収差の凸面鏡 (主曲率半径 inf と rho = r/cos beta)
+rm -rf "$WORK/ga_cone_mirror"; mkdir -p "$WORK/ga_cone_mirror"
+sed -e 's/^geometry = .*/geometry = 2 53 0.0 20.0 30.0 30.0 20.0 20.0 4.0 4.0/' \
+    -e "s/^feed = .*/feed = z $(awk 'BEGIN{b=atan2(0.4,1); printf "%.6f 30.0 %.6f", 36+8*cos(b), 10+8*sin(b)}') 1.0 0.0 50.0/" \
+    -e "s/^point = z 43.0 30.0 30.0 # axis/point = z $(awk 'BEGIN{b=atan2(0.4,1); printf "%.6f 30.0 %.6f", 36+4*cos(b), 10+4*sin(b)}') # axis/" \
+    -e '/# corner$/d' -e '/# behind$/d' \
+	"$SRC/ga_convex.ofd" > "$WORK/ga_cone_mirror/ga_convex.ofd"
+cp "$SRC/ga_convex.ofdx" "$WORK/ga_cone_mirror/"
+if "$GA_SOLVER" "$WORK/ga_cone_mirror" > /dev/null 2>&1; then
+	d="$WORK/ga_cone_mirror"
+	dump "$d/rir.wav" > "$d/axis.txt"
+	chk "ga cone mirror energy" \
+		"$(awk -v tc="$(awk 'BEGIN{printf "%.10f", 12.0/343.0}')" '
+			{ t = (NR - 1) / 48000; if (t > tc - 0.008 && t < tc + 0.008) e += $1 * $1 }
+			END { printf "%.10e", e }' "$d/axis.txt")" \
+		"$(awk -v pi="$PI" 'BEGIN{ b = atan2(0.4, 1); rho = 6/cos(b); s = 8; r = 4;
+			printf "%.10e", (1/(4*pi))^2 / ((s + r)*(s + r + 2*s*r/rho)) }')" 0.05
+else
+	say_ng "ga cone mirror energy" " (solver failed)"
+fi
+# (N2) 遮蔽 : 球を alpha = 1 にした変種 (反射を消して直接音だけを見る)
+rm -rf "$WORK/ga_convex_occ"; mkdir -p "$WORK/ga_convex_occ"
+cp "$SRC/ga_convex.ofd" "$WORK/ga_convex_occ/"
+sed 's/"geometry": 1, "alpha": \[0, 0, 0, 0, 0, 0\]/"geometry": 1, "alpha": [1, 1, 1, 1, 1, 1]/' \
+	"$SRC/ga_convex.ofdx" > "$WORK/ga_convex_occ/ga_convex.ofdx"
+if "$GA_SOLVER" "$WORK/ga_convex_occ" > /dev/null 2>&1; then
+	d="$WORK/ga_convex_occ"
+	dump "$d/rir_corner.wav" > "$d/corner.txt"
+	dump "$d/rir_behind.wav" > "$d/behind.txt"
+	rc=$(awk 'BEGIN{printf "%.10f", sqrt(16*16*2)}')
+	chk "ga exact occlusion (miss)" \
+		"$(ga_sum "$d/corner.txt" "$(awk -v r="$rc" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$rc" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+	awk -v a="$(ga_sum "$d/behind.txt" "$(awk 'BEGIN{printf "%.10f", 32.0/343.0}')" 0.001)" \
+	    -v pi="$PI" 'BEGIN { ref = 1/(4*pi*32.0); r = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/free-field=%.4f -> %s (< 0.05)\n", "ga exact occlusion (hit)", r, (r < 0.05) ? "OK" : "NG";
+		exit (r < 0.05) ? 0 : 1 }' || status=1
+else
+	say_ng "ga exact occlusion (miss)" " (solver failed)"
+fi
+# (N3) 斜めの平面 : 三角柱の斜辺の面での鏡面反射 = 平面への鏡像の閉形式
+# ga_mirror <sx sy sz> <rx ry rz> <nx ny nz> <d> : |R - S'| (S' = S - 2 ((S.n) - d) n、n は正規化)
+ga_mirror() {
+	awk -v s="$1" -v r="$2" -v n="$3" -v dd="$4" 'BEGIN {
+		split(s, S, " "); split(r, R, " "); split(n, N, " ");
+		l = sqrt(N[1]^2 + N[2]^2 + N[3]^2); h = (S[1]*N[1] + S[2]*N[2] + S[3]*N[3] - dd) / l;
+		for (i = 1; i <= 3; i++) { Sp = S[i] - 2 * h * N[i] / l; q += (R[i] - Sp)^2 }
+		printf "%.10f", sqrt(q) }'
+}
+ga_run ga_planar ga_planar.ofd ga_planar.ofdx && {
+	d="$WORK/ga_planar"
+	dump "$d/rir.wav" > "$d/front.txt"
+	dump "$d/rir_beyond.wav" > "$d/beyond.txt"
+	r1=$(ga_mirror "20 20 15" "25 15 15" "1 1 0" 30)
+	t1=$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')
+	chk "ga prism face reflection" "$(ga_sum "$d/front.txt" "$t1" 0.001)" \
+		"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+	chk "ga prism face arrival [s]" "$(ga_peak "$d/front.txt" "$t1" 0.001)" "$t1" 0.01
+	r2=$(ga_mirror "20 20 15" "35 5 15" "1 1 0" 30)
+	awk -v a="$(ga_sum "$d/beyond.txt" "$(awk -v r="$r2" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+	    -v r="$r2" -v pi="$PI" 'BEGIN { ref = 1/(4*pi*r); q = (a < 0 ? -a : a) / ref;
+		printf "%-26s |sum|/would-be=%.4f -> %s (< 0.05, 反射点が面の外)\n", "ga prism off-face rejected", q, (q < 0.05) ? "OK" : "NG";
+		exit (q < 0.05) ? 0 : 1 }' || status=1
+}
+# 斜めの面の入射角 : 同じ三角柱を alpha = 0.5 + 角度依存吸音にすると、
+# 反射は R(theta) = (zeta cos - 1)/(zeta cos + 1) 倍 (zeta は Paris の逆解)。
+# cos = |(R - S').n| / r1 = 20/(sqrt(2) sqrt(250)) = 0.8944 — 一般の平面では
+# 鏡映で方向が回るので、入射角を実経路から求めていることの番人
+# (垂直入射 cos = 1 として扱う誤実装は -5% ずれる)。
+rm -rf "$WORK/ga_planar_ad"; mkdir -p "$WORK/ga_planar_ad"
+cp "$SRC/ga_planar.ofd" "$WORK/ga_planar_ad/"
+sed -e 's/"obstacles": \[ { "geometry": 1, "alpha": \[0, 0, 0, 0, 0, 0\]/"angle_dependent_absorption": true, "obstacles": [ { "geometry": 1, "alpha": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]/' \
+	"$SRC/ga_planar.ofdx" > "$WORK/ga_planar_ad/ga_planar.ofdx"
+if "$GA_SOLVER" "$WORK/ga_planar_ad" > /dev/null 2>&1; then
+	d="$WORK/ga_planar_ad"
+	dump "$d/rir.wav" > "$d/front.txt"
+	r1=$(ga_mirror "20 20 15" "25 15 15" "1 1 0" 30)
+	zt=$(paris_zeta 0.5)
+	chk "ga slanted face R(theta)" \
+		"$(ga_sum "$d/front.txt" "$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$r1" -v z="$zt" -v pi="$PI" 'BEGIN{
+			c = 20/(sqrt(2)*r); R = (z*c - 1)/(z*c + 1); printf "%.10e", R/(4*pi*r) }')" 0.01
+else
+	say_ng "ga slanted face R(theta)" " (solver failed)"
+fi
+rm -rf "$WORK/ga_frustum"; mkdir -p "$WORK/ga_frustum"
+sed -e 's/^geometry = .*/geometry = 2 43 0.0 10.0 20.0 20.0 20.0 20.0 4.0 20.0/' \
+    -e 's/^feed = .*/feed = z 32.0 20.0 8.0 1.0 0.0 50.0/' \
+    -e '/^point = z 35.0/d' \
+    -e 's/^point = z 25.0 15.0 15.0 # front/point = z 36.0 20.0 4.0 # front/' \
+	"$SRC/ga_planar.ofd" > "$WORK/ga_frustum/ga_planar.ofd"
+cp "$SRC/ga_planar.ofdx" "$WORK/ga_frustum/"
+if "$GA_SOLVER" "$WORK/ga_frustum" > /dev/null 2>&1; then
+	d="$WORK/ga_frustum"
+	dump "$d/rir.wav" > "$d/front.txt"
+	r1=$(ga_mirror "32 20 8" "36 20 4" "1 0 0.8" 30)
+	chk "ga frustum face reflection" \
+		"$(ga_sum "$d/front.txt" "$(awk -v r="$r1" 'BEGIN{printf "%.10f", r/343.0}')" 0.001)" \
+		"$(awk -v r="$r1" -v pi="$PI" 'BEGIN{printf "%.10e", 1/(4*pi*r)}')" 0.01
+else
+	say_ng "ga frustum face reflection" " (solver failed)"
+fi
+# (N4) 平均自由行程 4V/S (Kosten) : 障害物の体積と表面積が形状どおり、±2%
+# ga_vs <名前> : "V S" (解析的。楕円の円錐台の側面積だけ数値積分)
+ga_vs() {
+	awk -v k="$1" -v pi="$PI" 'BEGIN {
+		V = 0; S = 0;
+		if (k == "sphere")   { V = 4/3*pi*27; S = 4*pi*9 }
+		if (k == "cylinder") { V = pi*9*6; S = 2*pi*3*6 + 2*pi*9 }
+		if (k == "cone")     { h = 6; r0 = 3; r1 = 1;
+		                       V = pi*h/3*(r0^2 + r0*r1 + r1^2);
+		                       S = pi*(r0 + r1)*sqrt(h^2 + (r0 - r1)^2) + pi*(r0^2 + r1^2) }
+		if (k == "ellcone")  { L = 6; A0 = 3; a = -2.5; B0 = 1; b = 1.5;
+		                       V = pi*L*(A0*B0 + (A0*b + B0*a)/2 + a*b/3);
+		                       nt = 360; ns = 120; lat = 0;
+		                       for (i = 0; i < nt; i++) { th = (i + 0.5)*2*pi/nt; c = cos(th); s = sin(th);
+		                         for (j = 0; j < ns; j++) { u = (j + 0.5)/ns; A = A0 + a*u; B = B0 + b*u;
+		                           # X(th,u) = (u L, A cos th, B sin th) : |X_th x X_u|
+		                           x1 = 0; y1 = -A*s; z1 = B*c; x2 = L; y2 = a*c; z2 = b*s;
+		                           cx = y1*z2 - z1*y2; cy = z1*x2 - x1*z2; cz = x1*y2 - y1*x2;
+		                           lat += sqrt(cx*cx + cy*cy + cz*cz) } }
+		                       S = lat*(2*pi/nt)*(1.0/ns) + pi*A0*B0 + pi*(A0 + a)*(B0 + b) }
+		if (k == "pyramid")  { h = 6; a0 = 6; a1 = 2; b0 = 4; b1 = 6;
+		                       V = h*(a0*b0 + (a0*(b1 - b0) + b0*(a1 - a0))/2 + (a1 - a0)*(b1 - b0)/3);
+		                       # (awk は改行で文が切れるので 1 項ずつ足す)
+		                       S = 2*(b0 + b1)/2*sqrt(h^2 + ((a0 - a1)/2)^2);
+		                       S += 2*(a0 + a1)/2*sqrt(h^2 + ((b0 - b1)/2)^2);
+		                       S += a0*b0 + a1*b1 }
+		if (k == "prism")    { V = 18*6; S = 2*18 + (6 + 6 + sqrt(72))*6 }
+		if (k == "box")      { V = 6*6*3; S = 2*(36 + 18 + 18) }
+		printf "%.10f %.10f", V, S }'
+}
+for v in "sphere:geometry = 2 2 2.0 8.0 2.0 8.0 2.0 8.0" \
+         "cylinder:geometry = 2 12 2.0 8.0 2.0 8.0 2.0 8.0" \
+         "cone:geometry = 2 53 2.0 8.0 5.0 5.0 6.0 6.0 2.0 2.0" \
+         "ellcone:geometry = 2 51 2.0 8.0 5.0 5.0 6.0 2.0 1.0 5.0" \
+         "pyramid:geometry = 2 42 2.0 8.0 5.0 5.0 6.0 4.0 2.0 6.0" \
+         "prism:geometry = 2 33 2.0 8.0 2.0 8.0 2.0 2.0 2.0 8.0" \
+         "box:geometry = 2 1 2.0 8.0 2.0 8.0 3.5 6.5" \
+         "empty:"; do
+	nm=${v%%:*}; gl=${v#*:}
+	dd="$WORK/ga_mfp_$nm"; rm -rf "$dd"; mkdir -p "$dd"
+	if [ -n "$gl" ]; then
+		sed "s/^geometry = .*/$gl/" "$SRC/ga_mfp.ofd" > "$dd/ga_mfp.ofd"
+	else
+		grep -v "^geometry" "$SRC/ga_mfp.ofd" > "$dd/ga_mfp.ofd"
+	fi
+	cp "$SRC/ga_mfp.ofdx" "$dd/"
+	if "$GA_SOLVER" "$dd" > /dev/null 2>&1; then
+		vs=$(ga_vs "$nm")
+		chk "ga mfp 4V/S $nm" \
+			"$(sed -n 's/.*ray tracing: \([0-9]*\) rays, \([0-9]*\) reflections.*/\1 \2/p' "$dd/solver.log" |
+			   awk '{ printf "%.10f", $1 * 343.0 * 1.0 / ($2 - $1) }')" \
+			"$(echo "$vs" | awk '{ printf "%.10f", 4 * (1000 - $1) / (600 + $2) }')" 0.02
+	else
+		say_ng "ga mfp 4V/S $nm" " (solver failed)"
+	fi
+done
+# (N5) 全 shape の受理と拒否 : FDTD の (v) と同じ voxel_shapes。外接箱の隅
+# (形状の外) の受音点 4 点を受理し、形状の中の受音点は形状を名指しして
+# 非零終了する (内外は FDTD と同じ規則)。metadata の形状モデル (楕円体・
+# 楕円柱・円錐台 7 個が curved、三角柱・角錐台 6 個が polyhedron)。
+rm -rf "$WORK/ga_voxel"; mkdir -p "$WORK/ga_voxel"
+cp "$SRC/voxel_shapes.ofd" "$SRC/voxel_shapes.ofdx" "$WORK/ga_voxel/"
+if "$GA_SOLVER" "$WORK/ga_voxel" > /dev/null 2> "$WORK/ga_voxel/stderr.log"; then
+	say_ok "ga AABB-only points" " (外接箱の隅の受音点 4 点を受理)"
+	if [ "$(grep -c '"model": "curved"' "$WORK/ga_voxel/metadata.json")" = 7 ] &&
+	   [ "$(grep -c '"model": "polyhedron"' "$WORK/ga_voxel/metadata.json")" = 6 ]; then
+		say_ok "ga geometry_models"
+	else
+		say_ng "ga geometry_models" " (expected 7 curved + 6 polyhedron)"
+	fi
+else
+	say_ng "ga AABB-only points" " ($(head -1 "$WORK/ga_voxel/stderr.log"))"
+fi
+rm -rf "$WORK/ga_voxel_in"; mkdir -p "$WORK/ga_voxel_in"
+sed 's/^point = z 0.125 0.175 0.125$/point = z 0.425 0.425 0.375/' \
+	"$SRC/voxel_shapes.ofd" > "$WORK/ga_voxel_in/voxel_shapes.ofd"
+cp "$SRC/voxel_shapes.ofdx" "$WORK/ga_voxel_in/"
+if "$GA_SOLVER" "$WORK/ga_voxel_in" > /dev/null 2> "$WORK/ga_voxel_in/stderr.log"; then
+	say_ng "ga inside-point exit" " (accepted a point inside the ellipsoid)"
+elif grep -q "inside rigid geometry #1 (shape 2)" "$WORK/ga_voxel_in/stderr.log"; then
+	say_ok "ga inside-point exit" " (refused, names geometry #1)"
+else
+	say_ng "ga inside-point exit" " (no reason on stderr)"
+fi
 
 echo "--- (F) ga determinism (bit-identical reruns and thread invariance)"
 # 乱数生成器を使わない (レイ方向は球面フィボナッチ格子、拡散反射の抽選は
